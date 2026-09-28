@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>선적계획 자동화 — 생산관리 과부족·선적계획</title>
+  <meta name="description" content="수주현황·재고현황·중국 선적예정 Excel을 넣으면 한국 입고예정일, 일자별 예상재고, 품번별 과부족과 부족수량 기준 선적계획을 계산하는 브라우저 도구(1단계)">
+  <meta name="robots" content="noindex">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <a class="skip" href="#main">본문으로 건너뛰기</a>
+  <header class="site-header">
+    <div class="inner header-inner">
+      <a class="brand" href="#/dashboard">
+        <span class="brand-name">선적계획 자동화</span>
+        <span class="brand-sub">생산관리 과부족 분석 · 선적계획 (1단계)</span>
+      </a>
+      <nav class="nav" id="nav" aria-label="주 메뉴"></nav>
+    </div>
+  </header>
+
+  <div id="sampleBanner" class="sample-banner" hidden>예시 데이터로 보고 있습니다 — 품번·수량·고객사는 모두 시연용 가상 값이며 실제 자료가 아닙니다.</div>
+
+  <main id="main" class="inner main" tabindex="-1"></main>
+
+  <footer class="site-footer">
+    <div class="inner">1단계 도구 · 불러온 자료와 계산 결과는 이 브라우저에만 저장되며 외부로 전송되지 않습니다</div>
+  </footer>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <!-- 로컬 파일(file://)로 열어도 돌도록 module 이 아닌 일반 스크립트로 불러옵니다 -->
+  <script src="vendor/xlsx.full.min.js"></script>
+  <script src="js/logic.js"></script>
+  <script src="js/sample-data.js"></script>
+  <script src="js/store.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
