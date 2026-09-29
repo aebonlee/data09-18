@@ -20,6 +20,8 @@
       settings: root.SPLogic.defaultSettings(),
       planEdits: {},
       ai: { answer: '', includeName: false },
+      intakeOpts: root.SPIntake ? root.SPIntake.defaultOptions() : {}, // 수주 취합 규칙 설정
+      intake: null, // 마지막 수주 취합 결과 {base, rows, files, checks, options, at, sample, stockCount, shipCount}
       _sample: false
     };
   }
@@ -37,6 +39,8 @@
       if (p.planEdits && typeof p.planEdits === 'object') st.planEdits = p.planEdits;
       if (p.ai) st.ai = { answer: String(p.ai.answer || ''), includeName: !!p.ai.includeName };
       st._sample = !!p._sample;
+      if (root.SPIntake) st.intakeOpts = root.SPIntake.mergeOptions(p.intakeOpts);
+      if (p.intake && Array.isArray(p.intake.rows)) st.intake = p.intake;
     } catch (e) { /* 깨진 값은 무시하고 빈 상태 */ }
     return st;
   }

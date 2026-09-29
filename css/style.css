@@ -177,3 +177,11 @@ table.list input[type="number"] { width: 100px; }
 
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: #1b2430; color: #fff; padding: 12px 18px; border-radius: var(--radius); z-index: 100; max-width: calc(100vw - 32px); }
 .toast.error { background: var(--danger); }
+
+/* 수주 취합 (기획서 11장) */
+.drop { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; text-align: center; min-height: 140px; padding: 20px 16px;
+  border: 2px dashed var(--line); border-radius: var(--radius); background: #f8fafc; cursor: pointer; }
+.drop:hover, .drop.over { border-color: var(--primary); background: #eef4fb; }
+.drop input[type=file] { max-width: 100%; margin-top: 6px; }
+.kpi-btn { text-align: left; font: inherit; color: inherit; cursor: pointer; width: 100%; }
+.kpi-btn:focus-visible { outline: 3px solid var(--primary); outline-offset: 2px; }

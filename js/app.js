@@ -2,7 +2,7 @@
    흐름: 자료 가져오기(열 매핑) → 설정 → 과부족 현황 / 일자별 예상재고 → 선적계획 → AI 분석 → 공유·내보내기, 대시보드 */
 (function () {
   'use strict';
-  var L = window.SPLogic, S = window.SPStore, Sample = window.SPSample;
+  var L = window.SPLogic, S = window.SPStore, Sample = window.SPSample, I = window.SPIntake, ISample = window.SPIntakeSample;
   var KEYS = ['orders', 'stock', 'shipments'];
   var st = S.load();
   var pendingSheets = { orders: null, stock: null, shipments: null }; // 방금 연 파일의 시트들(시트 바꾸기용, 저장 안 함)
@@ -72,7 +72,7 @@
           try { text = new TextDecoder('utf-8', { fatal: true }).decode(buf); }
           catch (e) { text = new TextDecoder('euc-kr').decode(buf); } // 엑셀에서 저장한 한글 CSV
           wb = XLSX.read(text.replace(/^﻿/, ''), { type: 'string', raw: true });
-        } else wb = XLSX.read(buf, { type: 'array', cellDates: true });
+        } else wb = XLSX.read(window.SPIntake ? window.SPIntake.fixZip(buf, XLSX) : buf, { type: 'array', cellDates: true }); // 포털 xlsx 의 <si > 고침(기획서 11.2)
         var sheets = {};
         wb.SheetNames.forEach(function (nm) { sheets[nm] = XLSX.utils.sheet_to_json(wb.Sheets[nm], { header: 1, raw: true, defval: '' }); });
         done(null, { names: wb.SheetNames, sheets: sheets });
@@ -445,8 +445,8 @@
         h('label', { class: 'field', style: 'flex:1 1 220px' }, h('span', null, '통합 파일 불러오기'), whole)),
       h('hr', { style: 'border:none;border-top:1px solid var(--line);margin:16px 0' }),
       h('button', { type: 'button', class: 'btn btn-danger', onclick: function () {
-        if (!window.confirm('불러온 자료·설정·선적계획 수정·AI 답을 모두 지웁니다. 계속할까요?')) return;
-        S.clear(); st = S.empty(); save(); render(); toast('모두 지웠습니다');
+        if (!window.confirm('불러온 자료·설정·선적계획 수정·AI 답·수주 취합 결과를 모두 지웁니다. 계속할까요?')) return;
+        S.clear(); st = S.empty(); intakeFiles = null; intakeSide = { stock: null, shipments: null }; save(); render(); toast('모두 지웠습니다');
       } }, '모두 지우기')));
   }
   function datasetCard(k) {
@@ -571,16 +571,254 @@
     main.appendChild(form);
   }
 
+  // ── 수주 취합 (기획서 11장) ─────────────────────────────
+  // 넣은 파일은 이 창에서만 기억합니다(설정을 바꾸면 다시 계산). 결과 표만 브라우저에 저장합니다.
+  var intakeFiles = null, intakeSide = { stock: null, shipments: null }, intakeFilter = { group: '', q: '' }, intakeBusy = false;
+  function fnv(buf) { var h = 0x811c9dc5; for (var i = 0; i < buf.length; i++) { h ^= buf[i]; h = Math.imul(h, 16777619) >>> 0; } return h.toString(16) + ':' + buf.length; }
+
+  var pdfjsPromise = null;
+  function loadPdfJs() {
+    if (pdfjsPromise) return pdfjsPromise;
+    function load(src) {
+      return new Promise(function (resolve, reject) {
+        var el = document.createElement('script');
+        el.src = src; el.onload = resolve;
+        el.onerror = function () { reject(new Error('PDF 라이브러리(' + src + ')를 불러오지 못했습니다')); };
+        document.head.appendChild(el);
+      });
+    }
+    // 로컬 파일(file://)로 열면 Worker 가 막히므로 worker 스크립트를 먼저 읽어 메인 스레드에서 돌립니다
+    pdfjsPromise = load('vendor/pdfjs/pdf.min.js')
+      .then(function () { return location.protocol === 'file:' ? load('vendor/pdfjs/pdf.worker.min.js') : null; })
+      .then(function () {
+        var lib = window.pdfjsLib;
+        if (!lib) throw new Error('PDF 라이브러리를 불러오지 못했습니다');
+        lib.GlobalWorkerOptions.workerSrc = 'vendor/pdfjs/pdf.worker.min.js';
+        return lib;
+      });
+    pdfjsPromise.catch(function () { pdfjsPromise = null; });
+    return pdfjsPromise;
+  }
+  function pdfItems(bytes) {
+    return loadPdfJs().then(function (lib) {
+      return lib.getDocument({ data: bytes, cMapUrl: 'vendor/pdfjs/cmaps/', cMapPacked: true, isEvalSupported: false }).promise;
+    }).then(function (doc) {
+      var out = [], p = Promise.resolve();
+      for (var i = 1; i <= doc.numPages; i++) (function (n) {
+        p = p.then(function () { return doc.getPage(n); }).then(function (pg) { return pg.getTextContent(); }).then(function (tc) {
+          tc.items.forEach(function (it) { if (it.str) out.push({ x: it.transform[4], y: it.transform[5], str: it.str, page: n }); });
+        });
+      })(i);
+      return p.then(function () { return out; });
+    });
+  }
+  /** 파일 하나 → intake 입력 {name, hash, sheets | pdf | error} */
+  function readIntakeFile(file) {
+    return new Promise(function (resolve) {
+      var reader = new FileReader();
+      reader.onerror = function () { resolve({ name: file.name, error: String(reader.error) }); };
+      reader.onload = function () {
+        var buf = new Uint8Array(reader.result), hash = fnv(buf);
+        if (/\.pdf$/i.test(file.name)) {
+          pdfItems(buf).then(function (items) { resolve({ name: file.name, hash: hash, pdf: items }); },
+            function (err) { resolve({ name: file.name, hash: hash, pdf: null, pdfError: String(err && err.message || err) }); });
+          return;
+        }
+        try {
+          var wb;
+          if (/\.csv$/i.test(file.name)) {
+            var text;
+            try { text = new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch (e) { text = new TextDecoder('euc-kr').decode(buf); }
+            wb = XLSX.read(text.replace(/^﻿/, ''), { type: 'string', raw: true });
+          } else wb = XLSX.read(I.fixZip(buf, XLSX), { type: 'array', cellDates: true });
+          var sheets = {};
+          wb.SheetNames.forEach(function (nm) { sheets[nm] = XLSX.utils.sheet_to_json(wb.Sheets[nm], { header: 1, raw: true, defval: '' }); });
+          resolve({ name: file.name, hash: hash, sheets: { names: wb.SheetNames, sheets: sheets } });
+        } catch (err) { resolve({ name: file.name, hash: hash, error: String(err && err.message || err) }); }
+      };
+      reader.readAsArrayBuffer(file);
+    });
+  }
+  function runIntake(sample) {
+    var input = intakeFiles.map(function (f) { return f.error ? { name: f.name, hash: f.hash } : f; });
+    var res = I.process(input, st.intakeOpts);
+    intakeFiles.forEach(function (f) { if (f.error) res.checks.unshift({ file: f.name, row: '', reason: '파일을 읽지 못함', detail: f.error }); });
+    intakeSide = { stock: res.stock, shipments: res.shipments };
+    st.intake = { base: res.base, fileBase: res.fileBase, rows: res.rows, files: res.files, checks: res.checks, options: res.options, at: new Date().toISOString(), sample: !!sample,
+      stockCount: res.stock ? res.stock.length : 0, shipCount: res.shipments ? res.shipments.length : 0, lastBobcatDate: res.lastBobcatDate };
+    save();
+  }
+  function addIntakeFiles(list, sample) {
+    if (!list.length || intakeBusy) return;
+    intakeBusy = true; toast('파일 ' + list.length + '개를 읽는 중입니다…');
+    Promise.all(list.map(readIntakeFile)).then(function (got) {
+      intakeFiles = got; intakeBusy = false;
+      runIntake(sample); render();
+      toast('파일 ' + got.length + '개를 취합했습니다 — 통합 수주 ' + st.intake.rows.length + '행, ★확인 필요 ' + st.intake.checks.length + '건');
+    });
+  }
+  function intakeSampleRun() {
+    intakeFiles = ISample.asInput();
+    st.intakeOpts = I.mergeOptions(Object.assign({}, st.intakeOpts, { base: ISample.BASE }));
+    runIntake(true); render();
+    toast('예시 파일 ' + intakeFiles.length + '개로 취합했습니다(가상 데이터)');
+  }
+  function sendIntakeToPlan() {
+    var r = st.intake;
+    if (!r || !r.rows.length) { toast('넘길 수주가 없습니다', true); return; }
+    setTable('orders', '수주취합_' + r.base + '.xlsx', '수주현황', I.ordersAoa(r.rows)); pendingSheets.orders = null;
+    var sent = ['수주 ' + r.rows.length + '행'];
+    if (intakeSide.stock) { setTable('stock', '창고별재고현황(수주 취합에서).xlsx', '재고현황', L.dataSheets({ stock: intakeSide.stock })['재고현황']); pendingSheets.stock = null; sent.push('재고 ' + intakeSide.stock.length + '행'); }
+    if (intakeSide.shipments) { setTable('shipments', '선적계획(수주 취합에서).xlsx', '선적예정', L.dataSheets({ shipments: intakeSide.shipments })['선적예정']); pendingSheets.shipments = null; sent.push('선적예정 ' + intakeSide.shipments.length + '행'); }
+    var missing = (r.stockCount && !intakeSide.stock) || (r.shipCount && !intakeSide.shipments);
+    st.settings = L.mergeSettings(Object.assign({}, st.settings, { baseDate: r.base }));
+    st._sample = !!r.sample;
+    save();
+    toast(sent.join(' · ') + '을 넘기고 기준일을 ' + r.base + '로 맞췄습니다' + (missing ? ' (재고·선적계획 파일은 창을 새로 열어 기억이 없어 넘기지 못했습니다 — 다시 넣어 주세요)' : ''));
+    location.hash = '#/dashboard';
+  }
+
+  function viewIntake() {
+    main.appendChild(h('div', { class: 'page-head' }, h('h1', null, '수주 취합'),
+      h('button', { type: 'button', class: 'btn', onclick: intakeSampleRun }, '예시 파일로 해 보기')));
+    main.appendChild(h('div', { class: 'alert info' },
+      '고객사 포털에서 내려받은 납품예정·누적결품·직송 파일, 밥캣 xls, 고객사 발주서(엑셀·PDF), 선적계획·창고별재고현황 파일을 한꺼번에 넣으면 파일 이름으로 종류를 알아보고 규칙대로 하나의 수주 표를 만듭니다. ',
+      '판별하지 못한 파일·칸은 빠뜨리지 않고 「★확인 필요」에 남깁니다. 파일은 이 브라우저 안에서만 읽습니다.'));
+
+    // 1. 파일 넣기
+    var input = h('input', { type: 'file', multiple: true, accept: '.xlsx,.xls,.csv,.pdf', 'aria-label': '수주 파일 여러 개' });
+    input.addEventListener('change', function () { addIntakeFiles(Array.prototype.slice.call(input.files)); });
+    var drop = h('label', { class: 'drop' }, h('strong', null, '파일을 여기에 끌어다 놓거나 눌러서 고르세요'),
+      h('span', { class: 'note' }, '여러 개를 한꺼번에 · xlsx·xls·csv·pdf · 같은 파일이 두 번 들어오면 한 번만 반영'), input);
+    ['dragover', 'dragenter'].forEach(function (ev) { drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.add('over'); }); });
+    ['dragleave', 'drop'].forEach(function (ev) { drop.addEventListener(ev, function () { drop.classList.remove('over'); }); });
+    drop.addEventListener('drop', function (e) { e.preventDefault(); addIntakeFiles(Array.prototype.slice.call(e.dataTransfer.files || [])); });
+    main.appendChild(h('div', { class: 'card' }, h('h2', null, '1. 파일 넣기'), drop,
+      h('details', { style: 'margin-top:12px' }, h('summary', null, '파일 이름으로 알아보는 규칙'),
+        h('ul', { class: 'note' },
+          h('li', null, '「납품예정」「누적결품」「직송」 + 「건기」「엔진」「AM」「CKD」 + 「인천」「군산」「안산」 — 고객사 포털 파일'),
+          h('li', null, '「밥캣」 + 「누적결품」「납품예정 … 일반」「직송」 — 밥캣 xls'),
+          h('li', null, '「선적계획」 → 선적예정 입력으로, 「재고」 → 재고현황 입력으로'),
+          h('li', null, '그 밖의 파일은 머리행으로 발주서 양식(목록형 A·B·C, 서식형 D)을 알아보고, 고객사 이름은 파일 이름을 씁니다. PDF 는 글자를 꺼내 읽습니다'),
+          h('li', null, '어느 것에도 맞지 않으면 「★확인 필요」로 갑니다')))));
+
+    // 2. 규칙 설정
+    var o = st.intakeOpts;
+    function setOpt(k, v) {
+      st.intakeOpts = I.mergeOptions(Object.assign({}, st.intakeOpts, (function () { var x = {}; x[k] = v; return x; })()));
+      if (intakeFiles) { runIntake(st.intake && st.intake.sample); toast('규칙을 바꿔 다시 취합했습니다'); }
+      else { save(); if (st.intake) toast('저장했습니다. 이미 만든 표에 반영하려면 파일을 다시 넣어 주세요'); }
+      render();
+    }
+    function sel(k, opts, label, help) {
+      var s = h('select', { name: k, onchange: function () { setOpt(k, s.value === 'true' ? true : s.value === 'false' ? false : s.value); } },
+        opts.map(function (x) { return h('option', { value: String(x[0]) }, x[1]); }));
+      s.value = String(o[k]);
+      return h('label', { class: 'field' }, h('span', null, label), s, help ? h('small', null, help) : null);
+    }
+    function numIn(k, label, help) {
+      var i = h('input', { type: 'number', min: '0', max: '30', step: '1', name: k, value: String(o[k]), onchange: function () { setOpt(k, i.value); } });
+      return h('label', { class: 'field' }, h('span', null, label), i, help ? h('small', null, help) : null);
+    }
+    function textIn(k, label, help, type) {
+      var i = h('input', { type: type || 'text', name: k, value: o[k] || '', onchange: function () { setOpt(k, i.value); } });
+      return h('label', { class: 'field' }, h('span', null, label), i, help ? h('small', null, help) : null);
+    }
+    main.appendChild(h('div', { class: 'card' }, h('h2', null, '2. 규칙 설정'),
+      h('p', { class: 'note' }, '요청에 적힌 규칙은 그대로 두고, 원문으로 정해지지 않은 것만 기본값을 두었습니다(「확인 부탁」). 바꾸면 넣은 파일로 바로 다시 취합합니다.'),
+      h('div', { class: 'form-grid' },
+        textIn('base', '기준일(오늘)', '비우면 파일 이름의 날짜(' + ((st.intake && st.intake.fileBase) || '없으면 오늘') + '). 밥캣 원납기 조임의 시작일입니다.', 'date'),
+        numIn('engineShortOffset', '엔진 결품 → 납기 당김(일)', '요청 ②: 납기 = 결품일 − 2일'),
+        sel('engineMode', [['override', '결품 우선 — 납품예정 행을 뺌'], ['sum', '둘 다 넣기(합산)']], '엔진 결품·납품예정에 같은 품번', '같은 공장·같은 품번 기준. 원문 「확인 필요」 — 기본은 결품 우선'),
+        sel('collectDirect', [[false, '넣지 않음(작업자 확인용)'], [true, '납품예정처럼 넣음']], '직송 파일', '인천건기·인천엔진 직송, 밥캣 직송'),
+        numIn('bobcatShortOffset', '밥캣 결품 → 납기 당김(일)', '원문에 없어 0(결품일 그대로)'),
+        sel('shortMode', [['increment', '날짜별로 늘어난 만큼 한 줄씩'], ['single', '가장 큰 결품을 첫 결품일 한 줄로']], '누적결품 → 수주 줄 만들기', '누적값이라 날짜별 증가분이 그날의 결품입니다'),
+        sel('monthBuckets', [[true, '넣음(그 달 첫날로)'], [false, '넣지 않음(일별 칸만)']], '누적결품의 월 단위 칸(11·12·01월…)'),
+        sel('poAllSheets', [[false, '발주일자가 가장 늦은 시트만'], [true, '모든 시트']], '발주서 파일에 시트가 여럿일 때'),
+        textIn('portalCustomer', '포털 파일 고객사 이름', '건기·엔진·AM·CKD 파일에는 고객사 이름이 없어 여기 적은 이름을 씁니다'),
+        textIn('bobcatCustomer', '밥캣 파일 고객사 이름'))));
+
+    var r = st.intake;
+    if (!r) { main.appendChild(h('div', { class: 'card empty' }, h('p', null, '아직 취합한 파일이 없습니다.'), h('p', { class: 'note' }, '파일을 넣거나 「예시 파일로 해 보기」로 먼저 둘러보세요.'))); return; }
+    if (r.sample) main.appendChild(h('div', { class: 'alert warn' }, '예시(가상) 파일로 만든 결과입니다. 품번·수량·고객사는 실제 자료가 아닙니다.'));
+    if (!intakeFiles) main.appendChild(h('div', { class: 'alert info' }, '이전에 만든 결과입니다(' + r.at.slice(0, 16).replace('T', ' ') + '). 규칙을 바꾸거나 재고·선적계획까지 넘기려면 파일을 다시 넣어 주세요.'));
+
+    var sum = I.summary(r);
+    main.appendChild(h('div', { class: 'kpis' },
+      h('div', { class: 'kpi' }, h('div', { class: 'k' }, '넣은 파일'), h('div', { class: 'v' }, n(sum.files)), h('div', { class: 's' }, '기준일 ' + r.base)),
+      h('div', { class: 'kpi' }, h('div', { class: 'k' }, '읽은 행'), h('div', { class: 'v' }, n(sum.read)), h('div', { class: 's' }, '규칙으로 뺀 행 ' + n(sum.excluded))),
+      h('div', { class: 'kpi' }, h('div', { class: 'k' }, '통합 수주'), h('div', { class: 'v' }, n(sum.rows) + '행'), h('div', { class: 's' }, '수량 합계 ' + n(sum.qty))),
+      h('button', { type: 'button', class: 'kpi kpi-btn' + (sum.checks ? ' alert-kpi' : ''), onclick: function () { var el = document.getElementById('intake-checks'); if (el) el.scrollIntoView({ behavior: 'smooth' }); } }, h('div', { class: 'k' }, '★확인 필요'), h('div', { class: 'v' }, n(sum.checks) + '건'), h('div', { class: 's' }, sum.checks ? '아래 목록을 확인해 주세요' : '없습니다'))));
+
+    main.appendChild(h('div', { class: 'card' }, h('h2', null, '3. 결과 쓰기'),
+      h('div', { class: 'btn-row' },
+        h('button', { type: 'button', class: 'btn btn-primary', onclick: sendIntakeToPlan, disabled: r.rows.length ? null : true }, '이 수주로 선적계획 계산'),
+        h('button', { type: 'button', class: 'btn', onclick: function () {
+          var sheets = I.exportSheets({ rows: r.rows, files: r.files, checks: r.checks, stock: intakeSide.stock, shipments: intakeSide.shipments });
+          writeXlsx(sheets, '수주취합_' + r.base + (r.sample ? '_예시데이터' : '') + '.xlsx');
+        } }, '통합 수주 Excel 내려받기')),
+      h('p', { class: 'note', style: 'margin-top:8px' }, '「이 수주로 선적계획 계산」은 통합 수주를 입력 ① 수주현황으로, 선적계획 파일(' + (r.shipCount || 0) + '행)은 입력 ③ 선적예정으로, 창고별재고현황(' + (r.stockCount || 0) + '행)은 입력 ② 재고현황으로 넘기고 기준일을 맞춘 뒤 대시보드로 갑니다. 넣지 않은 자료는 지금 들어 있는 것을 그대로 둡니다.'),
+      h('p', { class: 'note' }, 'Excel 시트: 통합수주 · 파일별집계 · ★확인필요 · 수주현황(이 도구 표준 열)' + (intakeSide.stock ? ' · 재고현황' : '') + (intakeSide.shipments ? ' · 선적예정' : '') + '.')));
+
+    // 파일별 집계
+    main.appendChild(h('div', { class: 'card' }, h('h2', null, '파일별 결과 ' + r.files.length + '개'),
+      h('div', { class: 'table-wrap' }, h('table', { class: 'list' },
+        h('thead', null, h('tr', null, ['원본파일', '판별', '고객사 · 공장 · 구분', '읽은 행', '수집', '규칙으로 뺀 행(사유)', '메모'].map(function (x, i) { return h('th', { class: i >= 3 && i <= 4 ? 'num' : null }, x); }))),
+        h('tbody', null, r.files.map(function (f) {
+          return h('tr', null, h('td', null, f.file), h('td', null, f.typeLabel), h('td', null, [f.customer, f.plant, f.group].filter(Boolean).join(' · ')),
+            h('td', { class: 'num' }, n(f.read)), h('td', { class: 'num' }, n(f.collected)),
+            h('td', null, Object.keys(f.excluded).map(function (k) { return h('span', { class: 'tag' }, k + ' ' + f.excluded[k]); })),
+            h('td', { class: 'note' }, f.notes.join(' / ')));
+        }))))));
+
+    // ★확인 필요
+    main.appendChild(h('div', { class: 'card', id: 'intake-checks' }, h('h2', null, '★확인 필요 ' + r.checks.length + '건'),
+      r.checks.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'list' },
+        h('thead', null, h('tr', null, ['원본파일', '행', '내용', '자세히'].map(function (x) { return h('th', null, x); }))),
+        h('tbody', null, r.checks.map(function (c) { return h('tr', null, h('td', null, c.file), h('td', { class: 'nowrap' }, String(c.row)), h('td', null, h('span', { class: 'tag warn' }, c.reason)), h('td', null, c.detail)); }))))
+        : h('p', { class: 'note' }, '판별하지 못한 파일·칸이 없습니다.')));
+
+    // 통합 수주 표
+    var groups = [];
+    r.rows.forEach(function (x) { if (groups.indexOf(x.group) < 0) groups.push(x.group); });
+    var gsel = h('select', { 'aria-label': '구분' }, h('option', { value: '' }, '전체 구분'), groups.map(function (g) { return h('option', { value: g }, g); }));
+    gsel.value = intakeFilter.group;
+    var q = h('input', { type: 'search', placeholder: '품목코드·고객사·파일 검색', value: intakeFilter.q, 'aria-label': '통합 수주 검색' });
+    var holder = h('div');
+    var LIMIT = 300;
+    function draw() {
+      intakeFilter.group = gsel.value; intakeFilter.q = q.value.trim().toLowerCase();
+      var rows = r.rows.filter(function (x) {
+        return (!intakeFilter.group || x.group === intakeFilter.group) && (!intakeFilter.q || (x.item + ' ' + x.customer + ' ' + x.source + ' ' + (x.name || '')).toLowerCase().indexOf(intakeFilter.q) >= 0);
+      });
+      holder.textContent = '';
+      holder.appendChild(h('div', { class: 'list-meta' }, h('span', null, rows.length + '행 · 수량 ' + n(rows.reduce(function (s, x) { return s + x.qty; }, 0))), rows.length > LIMIT ? h('span', { class: 'note' }, '화면에는 앞 ' + LIMIT + '행만 보입니다 — 전체는 Excel 로 내려받아 주세요') : null));
+      if (!rows.length) { holder.appendChild(h('p', { class: 'empty' }, '조건에 맞는 행이 없습니다.')); return; }
+      holder.appendChild(h('div', { class: 'table-wrap' }, h('table', { class: 'list' },
+        h('thead', null, h('tr', null, ['고객사', '공장', '구분', '품목코드', '수량', '납기일', '발주일', '원본파일 / 행', '비고'].map(function (x) { return h('th', { class: x === '수량' ? 'num' : null }, x); }))),
+        h('tbody', null, rows.slice(0, LIMIT).map(function (x) {
+          return h('tr', null, h('td', null, x.customer), h('td', null, x.plant), h('td', null, x.group), h('td', { class: 'nowrap' }, h('strong', null, x.item)),
+            h('td', { class: 'num' }, n(x.qty)), h('td', { class: 'nowrap' }, L.fmtDate(x.due)), h('td', { class: 'nowrap' }, x.orderDate || ''),
+            h('td', null, x.source + (x.sheet && x.sheet !== 'sheet1' && x.sheet !== 'Sheet1' ? ' · ' + x.sheet : '') + ' · ' + x.row), h('td', { class: 'note' }, [x.rule, x.note].filter(Boolean).join(' · ')));
+        })))));
+    }
+    gsel.addEventListener('change', draw); q.addEventListener('input', draw);
+    main.appendChild(h('div', { class: 'card' }, h('h2', null, '통합 수주 표'),
+      h('p', { class: 'note' }, '고객사 · 공장 · 구분 · 품목코드 · 수량 · 납기일 · 발주일 · 원본파일/행. 납기일 순입니다.'),
+      h('div', { class: 'form-grid' }, h('label', { class: 'field' }, h('span', null, '구분'), gsel), h('label', { class: 'field' }, h('span', null, '검색'), q)), holder));
+    draw();
+  }
+
   // ── 라우터 ──────────────────────────────────────────
   var ROUTES = [
-    ['dashboard', '대시보드', viewDashboard], ['data', '자료 가져오기', viewData], ['settings', '설정', viewSettings],
+    ['intake', '수주 취합', viewIntake], ['dashboard', '대시보드', viewDashboard], ['data', '자료 가져오기', viewData], ['settings', '설정', viewSettings],
     ['result', '과부족 현황', viewResult], ['daily', '일자별 예상재고', viewDaily], ['plan', '선적계획', viewPlan],
     ['ai', 'AI 분석', viewAi], ['share', '공유·내보내기', viewShare]
   ];
   function render() {
     var parts = (location.hash.replace(/^#\/?/, '') || (hasData() ? 'dashboard' : 'data')).split('/');
     var route = parts[0], arg = parts[1] ? decodeURIComponent(parts[1]) : '';
-    var hit = ROUTES.filter(function (r) { return r[0] === route; })[0] || ROUTES[0];
+    var hit = ROUTES.filter(function (r) { return r[0] === route; })[0] || ROUTES[1];
     var nav = document.getElementById('nav');
     nav.textContent = '';
     ROUTES.forEach(function (r) { nav.appendChild(h('a', { href: '#/' + r[0], 'aria-current': r[0] === hit[0] ? 'page' : null }, r[1])); });

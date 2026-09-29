@@ -28,6 +28,11 @@
 | `plan_edit` | 사용자가 고친 선적계획(선적일, 수량) | `planEdits` |
 | `ai_note` | AI 분석 답변과 고객사·품명 포함 여부 | `ai` |
 | `shipment_plan_log` | 확정·공유한 선적계획 기록(품번, 필요일, 선적일, 입고일, 수량, 상태) | 없음(새로 추가, 3단계용) |
+| `intake_setting` | 수주 취합 규칙 설정(엔진 결품 납기 당김 일수, 결품·납품예정 겹침 처리, 직송 수집, 월 단위 칸, 발주서 시트, 고객사 이름) | `intakeOpts` |
+| `intake_batch` | 파일 묶음을 한 번 취합한 결과(기준일, 그때 쓴 설정, 파일·행·★확인 건수) | `intake` 의 `base`·`options`·`sample` |
+| `intake_order_line` | 통합 수주 표 한 행(고객사, 공장, 구분, 품목코드, 수량, 납기일, 원납기, 발주일, 원본파일·시트·행, 규칙, 비고) | `intake.rows` |
+| `intake_file` | 파일별 집계(판별 종류, 읽은 행, 수집, 규칙으로 뺀 행과 사유, 메모) | `intake.files` |
+| `intake_check` | 「★확인 필요」 한 줄(파일, 행, 내용, 자세히) | `intake.checks` |
 
 지켜지는 규칙은 다음과 같습니다.
 
@@ -35,7 +40,9 @@
 - 수주 행은 orders 파일에만, 재고 행은 stock 파일에만, 선적 행은 shipments 파일에만 붙습니다.
 - 입고 규칙은 요일(0=일 ~ 6=토)마다 0~60 정수 또는 비움(규칙 없음)이어야 합니다. 기본값은 원문 규칙(월~수 +2일, 목 +4일, 금 +3일)입니다.
 - 선적계획 id 는 「품번@필요일」 형식, 상태는 정상·부족·주의·과잉·긴급 다섯 가지입니다.
-- 앱에서 upsert 할 때 지정할 `onConflict` 값: 행 표 3개는 `source_file_id,row_no`, `plan_edit` 는 `owner_id,plan_id`, `column_mapping` 은 `owner_id,dataset`.
+- 통합 수주 줄은 수량이 0 보다 커야 하고(누적결품의 음수는 양수로 바꿔 넣습니다), 공장은 인천·군산·안산 또는 빈칸, 납기일은 반드시 있어야 합니다. 원본 한 행이 여러 줄이 될 수 있어(누적결품 날짜별 증가분, 날짜별 수량 발주서) 「원본 파일·시트·행 + 납기일」로 한 줄을 가립니다.
+- 수주 취합 자식 표(`intake_order_line`·`intake_file`·`intake_check`)는 본인의 취합(`intake_batch`)에만 붙습니다.
+- 앱에서 upsert 할 때 지정할 `onConflict` 값: 행 표 3개는 `source_file_id,row_no`, `plan_edit` 는 `owner_id,plan_id`, `column_mapping` 은 `owner_id,dataset`, `intake_order_line` 은 `batch_id,source_file,source_sheet,source_row,due_date`, `intake_file` 은 `batch_id,file_name`.
 
 ## 보안
 
@@ -68,9 +75,9 @@
 
 ## 확인 방법
 
-- Table Editor 에 위 표의 테이블 10개가 보이면 됩니다.
-- Authentication → Policies 에서 10개 테이블 모두 RLS 가 켜져 있고 정책이 붙어 있는지 확인합니다.
-- SQL Editor 에서 다음을 실행하면 정책 38개가 나와야 합니다.
+- Table Editor 에 위 표의 테이블 15개가 보이면 됩니다.
+- Authentication → Policies 에서 15개 테이블 모두 RLS 가 켜져 있고 정책이 붙어 있는지 확인합니다.
+- SQL Editor 에서 다음을 실행하면 정책 58개가 나와야 합니다.
 
   ```sql
   select tablename, policyname, cmd from pg_policies where schemaname = 'public' order by 1, 2;

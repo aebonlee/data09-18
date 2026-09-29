@@ -57,12 +57,12 @@ do $t$ begin
   perform public._assert_eq(
     (select count(*)::int from pg_policy p join pg_class c on c.oid = p.polrelid
       join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public'),
-    38, '두 번 적용해도 정책이 38개 그대로다');
+    58, '두 번 적용해도 정책이 58개 그대로다');
   perform public._assert_eq(
     (select count(*)::int from pg_trigger t join pg_class c on c.oid = t.tgrelid
       join pg_namespace n on n.oid = c.relnamespace
       where n.nspname = 'public' and not t.tgisinternal),
-    9, '두 번 적용해도 updated_at 트리거가 9개 그대로다');
+    14, '두 번 적용해도 updated_at 트리거가 14개 그대로다');
   perform public._assert(public.valid_ship_rule('{"0": null, "1": 2, "2": 2, "3": 2, "4": 4, "5": 3, "6": null}'),
     '원문 입고 규칙(월~수 +2, 목 +4, 금 +3)은 올바른 규칙이다');
   perform public._assert(not public.valid_ship_rule('{"1": 61}'),  '61일 뒤 입고 규칙은 틀린 규칙이다');
@@ -154,6 +154,48 @@ begin
     '수정하면 updated_at 트리거가 현재 시각으로 바꾼다');
 end $t$;
 
+do $t$ begin raise notice '[프로젝트] 수주 취합 표 (기획서 11장)'; end $t$;
+do $t$
+declare v_b bigint;
+begin
+  insert into public.intake_setting default values;
+  perform public._assert_eq((select engine_short_offset from public.intake_setting), 2, '엔진 결품 납기 당김 기본값은 요청 ② 의 2일이다');
+  perform public._assert_eq((select engine_mode from public.intake_setting), 'override', '결품·납품예정 겹침 기본값은 결품 우선이다');
+  insert into public.intake_batch (base_date, options, file_count, row_count, check_count, is_sample)
+    values ('2026-09-29', '{"engineShortOffset":2}', 25, 38, 6, true) returning id into v_b;
+  perform set_config('test.a_batch', v_b::text, false);
+  insert into public.intake_order_line (batch_id, customer, plant, kind, item, qty, due_date, order_date, source_file, source_row, rule, note) values
+    (v_b, '포털 고객사', '인천', '엔진', 'SMP-E301', 2, '2026-10-03', '2026-09-29', '2026.09.29_누적결품 인천엔진.xlsx', '2', '누적결품', '결품일 2026-10-05 − 2일'),
+    (v_b, '포털 고객사', '인천', '엔진', 'SMP-E301', 3, '2026-10-06', '2026-09-29', '2026.09.29_누적결품 인천엔진.xlsx', '2', '누적결품', '결품일 2026-10-08 − 2일'),
+    (v_b, '고객사F_발주서', '', '발주서', 'SMP-PDF-0001', 120, '2026-10-08', '2026-09-10', '고객사F_발주서.pdf', 'p1', '발주서 PDF', '');
+  insert into public.intake_order_line (batch_id, kind, item, qty, due_date, original_due, source_file, source_row)
+    values (v_b, '밥캣', 'SMP-B705', 1, '2026-10-22', '2026-11-17', '26.09.29_납품예정 밥캣 일반.xls', '5');
+  insert into public.intake_file (batch_id, file_name, file_type, read_rows, collected, excluded, notes)
+    values (v_b, '2026.09.29_납품예정 인천엔진.xlsx', 'plan', 4, 1, '{"오더유형 Mass PO": 2, "결품 우선": 1}', array['예시']);
+  insert into public.intake_check (batch_id, source_file, source_row, reason, detail)
+    values (v_b, '회의메모_기타자료.xlsx', '', '종류를 판별하지 못한 파일', '');
+
+  perform public._assert_raises(format(
+    $q$insert into public.intake_order_line (batch_id, kind, item, qty, due_date, source_file, source_row) values (%s, '엔진', 'SMP-E301', 9, '2026-10-03', '2026.09.29_누적결품 인천엔진.xlsx', '2')$q$, v_b),
+    '23505', '같은 원본 행·같은 납기일 줄은 두 번 들어가지 않는다');
+  perform public._assert_raises(format(
+    $q$insert into public.intake_order_line (batch_id, kind, item, qty, due_date, source_file, source_row) values (%s, '엔진', 'X', -2, '2026-10-03', 'f', '9')$q$, v_b),
+    '23514', '수량은 양수만 받는다(결품 음수는 양수로 바꿔 넣는다)');
+  perform public._assert_raises(format(
+    $q$insert into public.intake_order_line (batch_id, plant, kind, item, qty, due_date, source_file, source_row) values (%s, '부산', '엔진', 'X', 1, '2026-10-03', 'f', '9')$q$, v_b),
+    '23514', '공장은 인천·군산·안산(또는 빈칸)만 받는다');
+  perform public._assert_raises(format(
+    $q$insert into public.intake_order_line (batch_id, kind, item, qty, source_file, source_row) values (%s, '엔진', 'X', 1, 'f', '9')$q$, v_b),
+    '23502', '납기일이 없는 수주 줄은 받지 않는다');
+  perform public._assert_raises($q$update public.intake_setting set engine_mode = 'max'$q$,
+    '23514', '겹침 규칙은 override/sum 만 받는다');
+  perform public._assert_raises($q$update public.intake_setting set engine_short_offset = 31$q$,
+    '23514', '결품 납기 당김은 0~30일');
+  perform public._assert_raises(format(
+    $q$insert into public.intake_file (batch_id, file_name, file_type, excluded) values (%s, 'x.xlsx', 'plan', '[1]')$q$, v_b),
+    '23514', '제외 사유는 {사유: 행 수} 객체여야 한다');
+end $t$;
+
 do $t$ begin raise notice '[프로젝트] 기록성 표(shipment_plan_log)'; end $t$;
 do $t$ begin
   perform public._assert_rows('update public.shipment_plan_log set qty = 0',
@@ -175,7 +217,8 @@ declare
 begin
   perform public._assert(not public.is_member(), 'B 는 구성원이 아니다');
   foreach t in array array['app_members', 'source_file', 'order_line', 'stock_line', 'shipment_line',
-                           'column_mapping', 'app_settings', 'plan_edit', 'ai_note', 'shipment_plan_log']
+                           'column_mapping', 'app_settings', 'plan_edit', 'ai_note', 'shipment_plan_log',
+                           'intake_setting', 'intake_batch', 'intake_order_line', 'intake_file', 'intake_check']
   loop
     perform public._assert_rows(format('select 1 from public.%I', t), 0, 'B 에게 A 의 ' || t || ' 가 안 보인다');
   end loop;
@@ -192,6 +235,10 @@ begin
   perform public._assert_raises(
     $q$insert into public.source_file (owner_id, dataset, file_name) values ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'orders', '위장')$q$,
     '42501', 'B 는 owner_id 를 A 로 위장해 넣을 수 없다');
+  perform public._assert_raises(format(
+    $q$insert into public.intake_order_line (batch_id, kind, item, qty, due_date, source_file, source_row) values (%s, '엔진', 'X', 1, '2026-10-01', 'f', '99')$q$, current_setting('test.a_batch')),
+    '42501', 'B 는 A 의 취합에 수주 줄을 끼워 넣을 수 없다');
+  perform public._assert_rows('delete from public.intake_batch', 0, 'B 는 A 의 취합을 지울 수 없다(0행)');
 end $t$;
 
 -- ── 사용자 C (member — 읽기 전용 팀원) ───────────────────────────
@@ -204,6 +251,8 @@ begin
   perform public._assert(public.is_member() and not public.is_admin(), 'C 는 구성원이지만 admin 이 아니다');
   perform public._assert_rows('select 1 from public.order_line', 2, 'C 는 A 의 수주 행을 본다(팀 공유)');
   perform public._assert_rows('select 1 from public.shipment_plan_log', 1, 'C 는 A 가 확정한 선적계획 기록을 본다');
+  perform public._assert_rows('select 1 from public.intake_order_line', 4, 'C 는 A 의 통합 수주 표를 본다(팀 공유)');
+  perform public._assert_rows('update public.intake_order_line set qty = 1', 0, 'C 는 A 의 통합 수주 표를 고칠 수 없다(0행)');
   perform public._assert_rows('select 1 from public.app_members', 1, 'C 는 구성원 명단 중 자기 행만 본다');
   perform public._assert_rows('update public.order_line set qty = 0',
     0, 'C 는 A 의 수주 행을 고칠 수 없다(0행)');
@@ -241,7 +290,8 @@ do $t$
 declare t text;
 begin
   foreach t in array array['app_members', 'source_file', 'order_line', 'stock_line', 'shipment_line',
-                           'column_mapping', 'app_settings', 'plan_edit', 'ai_note', 'shipment_plan_log']
+                           'column_mapping', 'app_settings', 'plan_edit', 'ai_note', 'shipment_plan_log',
+                           'intake_setting', 'intake_batch', 'intake_order_line', 'intake_file', 'intake_check']
   loop
     perform public._assert_rows(format('select 1 from public.%I', t), 0, 'anon 에게 ' || t || ' 가 안 보인다');
   end loop;
@@ -291,6 +341,8 @@ begin
 end $t$;
 
 -- 정리
+delete from public.intake_batch;
+delete from public.intake_setting;
 delete from public.shipment_plan_log;
 delete from public.ai_note;
 delete from public.plan_edit;

@@ -14,7 +14,7 @@
 --  본인 프로젝트에 올리는 것을 전제로 하므로 테이블 이름에 접두사를 붙이지 않았습니다.
 --  회사 공용 URL·키는 어디에도 들어 있지 않습니다.
 --
---  테이블 (10개)
+--  테이블 (15개)
 --    app_members        — 팀 구성원과 역할 (admin=생산관리 담당자 / member=구매·물류 담당자, 읽기 전용)
 --    source_file        — 올린 엑셀 한 벌 (dataset: orders 수주 / stock 재고 / shipments 선적예정)
 --    order_line         — 수주현황 한 행 (품번·품명·고객사·수주일·납기일·수주수량)
@@ -25,6 +25,12 @@
 --    plan_edit          — 사용자가 고친 선적계획 (선적일·수량)
 --    ai_note            — AI 분석 답변 붙여넣기 (고객사·품명 포함 여부)
 --    shipment_plan_log  — 확정·공유한 선적계획 기록 — 기록성, 수정·삭제 불가
+--    ── 수주 자동 취합 (기획서 11장, localStorage 의 intakeOpts · intake) ──
+--    intake_setting     — 수주 취합 규칙 설정 (결품 납기 당김 일수·결품/납품예정 겹침·직송 수집 …)
+--    intake_batch       — 파일 묶음 한 번 취합한 결과(기준일·설정 사본·건수)
+--    intake_order_line  — 통합 수주 표 한 행 (고객사·공장·구분·품목코드·수량·납기일·발주일·원본파일/행)
+--    intake_file        — 파일별 집계 (판별 종류·읽은 행·수집·규칙으로 뺀 행과 사유)
+--    intake_check       — 「★확인 필요」 한 줄 (판별·매핑하지 못한 파일·칸)
 --
 --  접근 규칙
 --    · 자료는 올린 사람(owner_id)만 쓰고 고친다.
@@ -194,6 +200,101 @@ create table if not exists public.shipment_plan_log (
 );
 create index if not exists shipment_plan_log_idx on public.shipment_plan_log (owner_id, issued_at desc);
 
+-- ── 수주 자동 취합 (기획서 11장) ─────────────────────────────────────────────
+-- 규칙 설정 (intake.js defaultOptions) — 사용자당 한 행
+create table if not exists public.intake_setting (
+  owner_id             uuid primary key default auth.uid(),
+  base_date            date,                                          -- 비우면 파일 이름 날짜 → 오늘
+  engine_short_offset  int not null default 2 check (engine_short_offset between 0 and 30),  -- 요청 ②: 결품일 − 2일
+  bobcat_short_offset  int not null default 0 check (bobcat_short_offset between 0 and 30),
+  engine_mode          text not null default 'override' check (engine_mode in ('override', 'sum')),  -- 결품 우선 | 합산
+  collect_direct       boolean not null default false,                -- 직송 파일 수집
+  month_buckets        boolean not null default true,                 -- 누적결품 월 단위 칸
+  short_mode           text not null default 'increment' check (short_mode in ('increment', 'single')),
+  po_all_sheets        boolean not null default false,                -- 발주서 시트 전부 / 가장 늦은 시트만
+  portal_customer      text not null default '포털 고객사',
+  bobcat_customer      text not null default '밥캣',
+  created_at           timestamptz not null default now(),
+  updated_at           timestamptz not null default now()
+);
+
+-- 취합 한 번 (파일 묶음)
+create table if not exists public.intake_batch (
+  id           bigint generated always as identity primary key,
+  owner_id     uuid not null default auth.uid(),
+  base_date    date not null,
+  options      jsonb not null default '{}'::jsonb check (jsonb_typeof(options) = 'object'),  -- 그때 쓴 규칙 설정 사본
+  file_count   int not null default 0 check (file_count >= 0),
+  row_count    int not null default 0 check (row_count >= 0),
+  check_count  int not null default 0 check (check_count >= 0),
+  is_sample    boolean not null default false,
+  created_at   timestamptz not null default now(),
+  updated_at   timestamptz not null default now()
+);
+create index if not exists intake_batch_owner_idx on public.intake_batch (owner_id, created_at desc);
+
+-- 통합 수주 표 한 행. 원본 한 행이 줄 여럿이 될 수 있다(누적결품 날짜별 증가분, 서식형 발주서 날짜 칸) —
+-- 그래서 원본 행 + 납기일로 한 줄을 가린다.
+create table if not exists public.intake_order_line (
+  id            bigint generated always as identity primary key,
+  owner_id      uuid not null default auth.uid(),
+  batch_id      bigint not null references public.intake_batch(id) on delete cascade,
+  customer      text not null default '',
+  plant         text not null default '' check (plant in ('', '인천', '군산', '안산')),
+  kind          text not null check (length(btrim(kind)) > 0),   -- 구분: 건기·엔진·AM·CKD·밥캣·발주서
+  item          text not null check (length(btrim(item)) > 0),   -- 품목코드
+  name          text not null default '',
+  qty           numeric not null check (qty > 0),                 -- 결품 음수는 양수로 바꿔 넣는다
+  due_date      date not null,                                    -- 납기일(엔진 결품 = 결품일 − 2일, 밥캣 = 조인 값)
+  original_due  date,                                             -- 밥캣 조이기 전 원납기
+  order_date    date,                                             -- 발주일(없으면 비움)
+  source_file   text not null check (length(btrim(source_file)) > 0),
+  source_sheet  text not null default '',
+  source_row    text not null check (length(btrim(source_row)) > 0),   -- 엑셀 행 번호 또는 PDF 'p1'
+  rule          text not null default '',
+  note          text not null default '',
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now(),
+  -- ⚠ upsert 시 onConflict: 'batch_id,source_file,source_sheet,source_row,due_date'
+  constraint intake_order_line_src_key unique (batch_id, source_file, source_sheet, source_row, due_date)
+);
+create index if not exists intake_order_line_item_idx on public.intake_order_line (batch_id, item, due_date);
+
+-- 파일별 집계
+create table if not exists public.intake_file (
+  id          bigint generated always as identity primary key,
+  owner_id    uuid not null default auth.uid(),
+  batch_id    bigint not null references public.intake_batch(id) on delete cascade,
+  file_name   text not null check (length(btrim(file_name)) > 0),
+  file_type   text not null,        -- plan · short · direct · bobcatShort · bobcatPlan · bobcatDirect · shipplan · stock · po · pdf · unknown
+  type_label  text not null default '',
+  customer    text not null default '',
+  plant       text not null default '',
+  kind        text not null default '',
+  read_rows   int not null default 0 check (read_rows >= 0),
+  collected   int not null default 0 check (collected >= 0),
+  excluded    jsonb not null default '{}'::jsonb check (jsonb_typeof(excluded) = 'object'),  -- {사유: 행 수}
+  notes       text[] not null default '{}',
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now(),
+  -- ⚠ upsert 시 onConflict: 'batch_id,file_name'
+  constraint intake_file_batch_name_key unique (batch_id, file_name)
+);
+
+-- 「★확인 필요」
+create table if not exists public.intake_check (
+  id           bigint generated always as identity primary key,
+  owner_id     uuid not null default auth.uid(),
+  batch_id     bigint not null references public.intake_batch(id) on delete cascade,
+  source_file  text not null,
+  source_row   text not null default '',
+  reason       text not null check (length(btrim(reason)) > 0),
+  detail       text not null default '',
+  created_at   timestamptz not null default now(),
+  updated_at   timestamptz not null default now()
+);
+create index if not exists intake_check_batch_idx on public.intake_check (batch_id);
+
 -- ----------------------------------------------------------------------------
 -- 2. 함수 — search_path 고정
 -- ----------------------------------------------------------------------------
@@ -222,7 +323,8 @@ do $trg$
 declare t text;
 begin
   foreach t in array array['app_members', 'source_file', 'order_line', 'stock_line', 'shipment_line',
-                           'column_mapping', 'app_settings', 'plan_edit', 'ai_note']
+                           'column_mapping', 'app_settings', 'plan_edit', 'ai_note',
+                           'intake_setting', 'intake_batch', 'intake_order_line', 'intake_file', 'intake_check']
   loop
     execute format('drop trigger if exists %I on public.%I', t || '_updated_at', t);
     execute format('create trigger %I before update on public.%I for each row execute function public.set_updated_at()',
@@ -245,6 +347,11 @@ alter table public.app_settings      enable row level security;
 alter table public.plan_edit         enable row level security;
 alter table public.ai_note           enable row level security;
 alter table public.shipment_plan_log enable row level security;
+alter table public.intake_setting    enable row level security;
+alter table public.intake_batch      enable row level security;
+alter table public.intake_order_line enable row level security;
+alter table public.intake_file       enable row level security;
+alter table public.intake_check      enable row level security;
 
 -- 3-1. 팀 구성원 : 본인 행은 본인이 보고, 전체 목록과 등록·변경·해제는 admin 만
 drop policy if exists app_members_select on public.app_members;
@@ -264,7 +371,8 @@ create policy app_members_delete on public.app_members for delete to authenticat
 do $rls$
 declare t text;
 begin
-  foreach t in array array['source_file', 'column_mapping', 'app_settings', 'plan_edit', 'ai_note']
+  foreach t in array array['source_file', 'column_mapping', 'app_settings', 'plan_edit', 'ai_note',
+                           'intake_setting', 'intake_batch']
   loop
     execute format('drop policy if exists %I on public.%I', t || '_select', t);
     execute format('drop policy if exists %I on public.%I', t || '_insert', t);
@@ -305,6 +413,28 @@ begin
                    r.t || '_update', r.t, r.ds);
     execute format('create policy %I on public.%I for delete to authenticated using (owner_id = auth.uid())',
                    r.t || '_delete', r.t);
+  end loop;
+end;
+$rls$;
+
+-- 3-3b. 수주 취합 자식 표 : 붙는 취합(intake_batch)이 본인 것이어야 한다
+do $rls$
+declare t text;
+begin
+  foreach t in array array['intake_order_line', 'intake_file', 'intake_check']
+  loop
+    execute format('drop policy if exists %I on public.%I', t || '_select', t);
+    execute format('drop policy if exists %I on public.%I', t || '_insert', t);
+    execute format('drop policy if exists %I on public.%I', t || '_update', t);
+    execute format('drop policy if exists %I on public.%I', t || '_delete', t);
+    execute format('create policy %I on public.%I for select to authenticated using (owner_id = auth.uid() or public.is_member())',
+                   t || '_select', t);
+    execute format('create policy %I on public.%I for insert to authenticated with check (owner_id = auth.uid() and exists (select 1 from public.intake_batch b where b.id = batch_id and b.owner_id = auth.uid()))',
+                   t || '_insert', t);
+    execute format('create policy %I on public.%I for update to authenticated using (owner_id = auth.uid()) with check (owner_id = auth.uid() and exists (select 1 from public.intake_batch b where b.id = batch_id and b.owner_id = auth.uid()))',
+                   t || '_update', t);
+    execute format('create policy %I on public.%I for delete to authenticated using (owner_id = auth.uid())',
+                   t || '_delete', t);
   end loop;
 end;
 $rls$;
