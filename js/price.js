@@ -5,6 +5,8 @@
      매입단가(생산처 발주) — 당사 → 생산처 발주단가. 수강생이 따로 관리하는 「품목별 단가표」(품목코드 → 매입단가, 생산처 선택)에서 찾고,
                            단가표에 없는 품목은 화면에서 직접 적습니다. 고객 발주 단가와 무관합니다. ERP 업로드 양식의 단가 열은 이 값입니다.
    매입단가를 정하는 순서: 1. 매입단가표(천일품번 — 매핑 없는 품번은 고객사 원품번) 2. 직접입력. 둘 다 없으면 「매입단가 없음」.
+   2026-09-30 다섯 번째 답변(기획서 11.17)부터 화면은 매입단가표를 쓰지 않습니다(「기존 기초정보 관련파일은 무시」):
+     매입단가 = 1. 완제품정보의 「발주단가(원화)」 그대로(환율 계산 없음 — 환율은 수강생이 엑셀에 수기 입력) 2. 직접입력(원화).
    판매 − 매입(단가 차이)은 둘 다 있을 때만 계산합니다(화면에서 켜고 끔).
    매입단가표·직접입력 값은 실제 회사 자료라 이 브라우저(localStorage)에만 저장합니다(리포에는 가상 예시만).
    2026-09-30 환율(기획서 11.15): 매입단가표에 「통화」 칸(China(RMB)·RMB·CNY·USD…)이나 「12.5 RMB」 같은 값, 「매입단가(RMB)」 같은 머리가 있으면
@@ -127,6 +129,13 @@
     return t.map[buyKey(r)] || null;
   }
   function amount(qty, price) { return price == null ? null : round2(qty * price); }
+  /** 완제품정보 한 줄의 최종 원화 발주단가: 「발주단가(원화)」 칸, 그 칸이 비었으면 통화가 원화인 발주단가. 그 밖(외화인데 원화 칸 없음 등)은 null — 짐작하지 않음 */
+  function productKrw(pe) {
+    if (!pe) return null;
+    if (pe.buyKrw != null && pe.buyKrw > 0) return pe.buyKrw;
+    if (pe.buy != null && pe.buy > 0 && pe.cur === 'KRW') return pe.buy;
+    return null;
+  }
 
   /* 통합 수주 행(매핑을 거친 것)에 매입단가 붙이기. rows 는 바꾸지 않고 새 행을 돌려줍니다.
      table = parseBook 결과(없으면 null), manual = { buyKey: 매입단가 }
@@ -139,9 +148,11 @@
        defaultCur — 통화가 적히지 않은 매입단가의 통화(매입단가표 · 직접입력 공통, 기본 'KRW')
        manualCur  — { buyKey: 통화 } 직접 적은 매입단가의 통화(없으면 defaultCur)
        fx         — { resolver: SPFx.resolver(...), mode: 'prev'|'same' } — 외화를 원화로 바꿀 때 씀
-       product    — SPProduct.parseBook 결과(완제품정보, 기획서 11.16). 매입단가표에 없는 품번의 발주단가 · 통화 · 생산처,
+       product    — SPProduct.parseBook 결과(완제품정보, 기획서 11.16 · 11.17). 매입단가 = 완제품정보의 「발주단가(원화)」 그대로(환율 계산 없음) · 생산처,
                     모든 줄에 고객사(productCustomer) · 특이사항(productNote) · 단종/생산금지(productStop) · 조립처
-       productFallback — true 면 월평균 환율이 없을 때 완제품정보의 「발주단가(원화)」(파일의 고정 환율 값)를 씀(기본 false — 확인 부탁) */
+     2026-09-30 다섯 번째 답변(기획서 11.17) 뒤 화면(app.js)은 table 을 null 로 넘깁니다 — 매입단가 = 완제품정보 > 직접입력(원화).
+     매입단가표(table) 경로와 외화 환산은 지우지 않고 남겨 두었습니다(표를 넘길 때만 동작 · 테스트로 지킴).
+     (판 1.1 의 productFallback — 월평균이 없을 때만 파일 원화 칸 — 은 원화 칸을 늘 쓰게 되어 없앴습니다) */
   function apply(rows, table, manual, opts) {
     manual = manual || {}; opts = opts || {};
     var defCur = opts.defaultCur && opts.defaultCur !== 'KRW' ? opts.defaultCur : '';
@@ -160,8 +171,8 @@
       tableLoaded: has(table), manualCount: 0, manualShadowed: 0, bySource: {},
       buyMultiRows: 0, buyMultiItems: 0,
       buyFx: 0, buyFxNone: 0, saleFx: 0, saleFxNone: 0,  // 외화 단가를 원화로 바꾼 행 · 환율이 없어 금액에서 뺀 행
-      productLoaded: false, productRows: 0, productStopRows: 0, productStopItems: 0, buyFileFallback: 0,
-      fileKrwRows: 0, fileKrwAmount: 0, fxKrwAmount: 0   // 완제품정보 발주단가로 원화를 낸 줄: 파일 원화(고정 환율) 금액 vs 월평균 금액
+      productLoaded: false, productRows: 0, productStopRows: 0, productStopItems: 0,
+      fileKrwRows: 0, buyKrwBlank: 0   // 완제품정보 「발주단가(원화)」를 그대로 쓴 줄 · 완제품정보에 발주단가는 있지만 원화 칸이 빈 줄
     };
     var prod = opts.product && opts.product.map && Object.keys(opts.product.map).length ? opts.product : null;
     stats.productLoaded = !!prod;
@@ -197,31 +208,36 @@
         x.buyPrice = t.price; x.buySrc = BUY_SRC.table; x.maker = t.maker || ''; bc = t.cur || defCur;
         if (table.conflicts && table.conflicts[k]) { x.buyMulti = true; stats.buyMultiRows++; multi[k] = 1; }   // 단가가 여럿 → 위쪽 값(확정)
       }
-      else if (pe && pe.buy && pe.cur !== '?') {   // 완제품정보 발주단가 — 통화 칸(또는 원화 칸으로 추정한 위안), 없으면 기본 통화
-        x.buyPrice = pe.buy; x.buySrc = BUY_SRC.product; x.maker = pe.maker || ''; bc = pe.cur || defCur;
-        if (pe.buyKrw && bc && bc !== 'KRW') x.buyKrwFile = pe.buyKrw;
+      else if (pe && productKrw(pe) != null) {
+        // 2026-09-30 다섯 번째 답변(기획서 11.17): 「1,2,3 모두 완제품정보 파일 단가 적용 … 환율은 엑셀에 수기입력하여 관리」
+        // → 완제품정보의 「발주단가(원화)」를 최종 원화 매입단가로 그대로 씁니다(월평균 환율로 다시 계산하지 않음).
+        //   원화 칸이 빈 줄은 통화가 원화일 때만 발주단가를 그대로 씁니다. 원래 통화 · 값 · 파일 환율(원화 ÷ 발주단가)은 참고로 남깁니다.
+        x.buyPrice = productKrw(pe); x.buySrc = BUY_SRC.product; x.maker = pe.maker || ''; bc = '';
+        x.buyKrwFile = x.buyPrice;
+        if (pe.buy && pe.cur && pe.cur !== 'KRW') { x.buyPriceOrig = pe.buy; x.buyCur = pe.cur === '?' ? '모름' : pe.cur; x.buyRateFile = pe.implied; }
+        stats.fileKrwRows++;
       }
-      else if (m != null && m > 0) { x.buyPrice = m; x.buySrc = BUY_SRC.manual; x.maker = ''; bc = manCur[k] || defCur; }
-      else { x.buyPrice = null; x.buySrc = ''; x.maker = ''; }
+      else if (m != null && m > 0) {
+        x.buyPrice = m; x.buySrc = BUY_SRC.manual; x.maker = ''; bc = manCur[k] || defCur;
+        if (pe && pe.buy) x.buyKrwBlank = true;
+      }
+      else {
+        x.buyPrice = null; x.buySrc = ''; x.maker = '';
+        if (pe && pe.buy) x.buyKrwBlank = true;   // 완제품정보에 외화 발주단가는 있지만 원화 칸이 비어 있음 → 짐작하지 않고 「매입단가 없음」
+      }
       if (bc === 'KRW') bc = '';
-      if (x.buyPrice != null && bc) {   // 외화 매입단가 → 원화
+      if (x.buyPrice != null && bc) {   // 외화 매입단가 → 원화(매입단가표 · 직접입력에서 통화를 고른 경우만 — 완제품정보 단가는 환산하지 않음)
         var bv = conv(x.buyPrice, bc, r);
         x.buyPriceOrig = x.buyPrice; x.buyCur = bc;
-        if (bv.missing && opts.productFallback && x.buyKrwFile) {   // 월평균이 없으면 완제품정보의 원화 칸(고정 환율)
-          x.buyPrice = x.buyKrwFile; stats.buyFileFallback++;
-          x.buyFx = { cur: bc, orig: x.buyPriceOrig, raw: pe.implied, unit: 1, rate: pe.implied, month: '', src: '완제품정보 원화 칸(고정 환율)', krw: x.buyKrwFile, fallback: true };
-          fxMiss[bv.cur + '|' + bv.month + '|' + bv.reason].rows--;
-          if (!fxMiss[bv.cur + '|' + bv.month + '|' + bv.reason].rows) delete fxMiss[bv.cur + '|' + bv.month + '|' + bv.reason];
-        }
-        else if (bv.missing) { x.buyPrice = null; x.buyFxMissing = bv; }
+        if (bv.missing) { x.buyPrice = null; x.buyFxMissing = bv; }
         else { x.buyPrice = bv.krw; x.buyFx = bv; stats.buyFx++; }
-        if (x.buyKrwFile && x.buyFx && !x.buyFx.fallback) { stats.fileKrwRows++; stats.fileKrwAmount += x.qty * x.buyKrwFile; stats.fxKrwAmount += x.qty * x.buyPrice; }
       }
       x.buyAmount = amount(x.qty, x.buyPrice);
       if (x.buyFxMissing) { stats.buyFxNone++; }
       else if (x.buyPrice == null) {
         stats.buyNone++; bs.buyNone++;
-        var e = miss[k] || (miss[k] = { key: k, item: r.company || r.item, customerItem: r.customerItem || r.item, customers: [], group: r.group, rows: 0, qty: 0, files: [], name: r.name || '' });
+        var e = miss[k] || (miss[k] = { key: k, item: r.company || r.item, customerItem: r.customerItem || r.item, customers: [], group: r.group, rows: 0, qty: 0, files: [], name: r.name || '', reason: x.buyKrwBlank ? '완제품정보 원화 칸 비어 있음' : pe ? '완제품정보에 발주단가 없음' : prod ? '완제품정보에 없는 품번' : '' });
+        if (x.buyKrwBlank) stats.buyKrwBlank++;
         e.rows++; e.qty += r.qty || 0;
         if (e.files.indexOf(r.source) < 0) e.files.push(r.source);
         if (r.customer && e.customers.indexOf(r.customer) < 0) e.customers.push(r.customer);
@@ -237,7 +253,7 @@
       } else { x.margin = null; x.marginAmount = null; }
       return x;
     });
-    ['buyAmount', 'saleAmount', 'marginAmount', 'fileKrwAmount', 'fxKrwAmount'].forEach(function (f) { stats[f] = round2(stats[f]); });
+    ['buyAmount', 'saleAmount', 'marginAmount'].forEach(function (f) { stats[f] = round2(stats[f]); });
     stats.productStopItems = Object.keys(stopItems).length;
     stats.negativeItems = Object.keys(neg).length;
     stats.buyMultiItems = Object.keys(multi).length;
@@ -277,8 +293,8 @@
   }
   /** 「매입단가 없음」 목록 → Excel 시트 */
   function missingAoa(missing) {
-    return [['품목코드', '고객사 품번', '품목명', '고객사', '구분', '행 수', '수량 합계', '원본파일']].concat(missing.map(function (m) {
-      return [m.item, m.customerItem !== m.item ? m.customerItem : '', m.name || '', m.customers.join(', '), m.group || '', m.rows, m.qty, m.files.join(', ')];
+    return [['품목코드', '고객사 품번', '품목명', '고객사', '구분', '행 수', '수량 합계', '원본파일', '사유']].concat(missing.map(function (m) {
+      return [m.item, m.customerItem !== m.item ? m.customerItem : '', m.name || '', m.customers.join(', '), m.group || '', m.rows, m.qty, m.files.join(', '), m.reason || ''];
     }));
   }
   /** 매입단가표 채우기 양식: 매입단가 없는 품목을 「품목코드 | 품목명 | 생산처 | 매입단가」 빈칸으로 — 채워서 다시 넣으면 그대로 읽힙니다 */
@@ -289,6 +305,6 @@
   return {
     SALE_SRC: SALE_SRC, SALE_ORDER: SALE_ORDER, BUY_SRC: BUY_SRC, BUY_ORDER: BUY_ORDER,
     key: key, num: num, findCols: findCols, parseBook: parseBook, has: has, lookup: lookup, buyKey: buyKey,
-    amount: amount, apply: apply, multiList: multiList, sourceDisagreements: sourceDisagreements, missingAoa: missingAoa, templateAoa: templateAoa
+    amount: amount, productKrw: productKrw, apply: apply, multiList: multiList, sourceDisagreements: sourceDisagreements, missingAoa: missingAoa, templateAoa: templateAoa
   };
 });

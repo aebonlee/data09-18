@@ -36,7 +36,7 @@
       // 환율(기획서 11.15): mode prev 납기월의 전월 평균(기본) | same 당월 평균 · defaultCur 통화가 적히지 않은 매입단가의 통화
       //   manual {'CNY|2026-09': 환율} 직접 입력(가장 먼저 씀) · useAuto 자동 값(data/rates.js) 사용
       fx: { mode: 'prev', defaultCur: 'KRW', manual: {}, useAuto: true },
-      productOpts: { fallbackKrw: false }, // 완제품정보: 월평균 환율이 없을 때 파일의 「발주단가(원화)」(고정 환율 값)를 쓸지 — 기본 쓰지 않음(확인 부탁)
+      productOpts: { fallbackKrw: false }, // (판 1.1 설정 — 2026-09-30 다섯 번째 답변 뒤 쓰지 않음: 완제품정보 「발주단가(원화)」를 늘 그대로 씀, 기획서 11.17)
       manualBuyCur: {}, // 직접 적은 매입단가의 통화 {품목코드 열쇠: 'CNY'…} — 없으면 fx.defaultCur
       _sample: false
     };

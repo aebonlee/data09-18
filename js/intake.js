@@ -732,13 +732,16 @@
     '납기일', '발주일', '원본파일', '원본 시트', '원본 행', '규칙', '비고'];
   var MARGIN_HEAD = ['판매−매입(단가)', '판매−매입(금액)'];
   // 환율(기획서 11.15) — 맨 끝에 붙임. 원화면 빈칸, 외화면 원래 통화·값과 쓴 환율(또는 「환율 없음」 사유)
-  // 완제품정보(기획서 11.16) — 환율 열 앞에. 매입단가가 완제품정보에서 왔으면 파일의 원화(고정 환율) 값도
+  // 완제품정보(기획서 11.16) — 환율 열 앞에. 매입단가가 완제품정보에서 왔으면 파일의 원화 값(= 매입단가, 기획서 11.17)도
   var PRODUCT_HEAD = ['완제품 고객사', '완제품 특이사항', '조립처', '단종·생산금지', '발주단가(원화) — 완제품정보 파일'];
   var FX_HEAD = ['판매 통화', '판매단가(원래 값)', '매입 통화', '매입단가(원래 값)', '환율 적용 내역'];
   function fxNote(r) {
-    return [r.saleFx || r.saleFxMissing, r.buyFx || r.buyFxMissing].filter(Boolean).map(function (f) {
+    var out = [r.saleFx || r.saleFxMissing, r.buyFx || r.buyFxMissing].filter(Boolean).map(function (f) {
       return f.missing ? '환율 없음 — ' + f.reason : f.cur + ' ' + f.orig + ' × ' + f.raw + (f.unit !== 1 ? '/' + f.unit : '') + ' = ' + f.krw + '원 (' + f.month + ' 월평균 · ' + f.src + ')';
-    }).join(' / ');
+    });
+    // 2026-09-30 다섯 번째 답변(기획서 11.17): 완제품정보 외화 단가는 환산하지 않고 파일의 원화 칸을 그대로 — 원래 값 · 파일 환율만 적음
+    if (r.buySrc === '완제품정보' && r.buyCur) out.push('매입: 완제품정보 발주단가(원화) 그대로 — ' + r.buyCur + ' ' + r.buyPriceOrig + (r.buyRateFile ? ' · 파일 환율 ' + r.buyRateFile : '') + ' → ' + r.buyPrice + '원');
+    return out.join(' / ');
   }
   function amountOf(r) { return r.price == null ? null : Math.round(r.qty * r.price * 100) / 100; }
   function buyAmountOf(r) { return r.buyPrice == null ? null : Math.round(r.qty * r.buyPrice * 100) / 100; }
