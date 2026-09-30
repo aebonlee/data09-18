@@ -37,23 +37,35 @@
   function customerFromName(name) { return baseName(name).replace(/\.[^.]+$/, '').replace(/^\d+_/, '').trim(); }
 
   // ── 설정 (화면에서 바꾸고 이 브라우저에 저장) ───────────
+  /* 수강생 답(2026-09-30)으로 기본값이 바뀐 규칙. 예전 기본값이 이 브라우저에 저장돼 있어도 새 확정값으로 한 번 되돌립니다 */
+  var RULES_VERSION = '2026-09-30';
+  var RESET_ON_UPGRADE = ['collectDirect', 'bobcatShortOffset', 'engineMode', 'poAllSheets'];
   function defaultOptions() {
     return {
+      rulesVersion: RULES_VERSION,
       base: '',                  // 기준일(오늘). 비우면 파일 이름 날짜 → 없으면 오늘
       engineShortOffset: 2,      // 요청 ②: 엔진 납기 = 결품일 − 2일
-      bobcatShortOffset: 0,      // 밥캣 결품은 원문에 당김 규칙 없음 → 0 (확인 부탁)
-      engineMode: 'override',    // 엔진 결품과 납품예정에 같은 품번: override = 결품 우선(납품예정 행 뺌) | sum = 둘 다
-      collectDirect: false,      // 직송 파일(인천건기·엔진, 밥캣 직송)도 수집할지 — 매크로 문서상 「작업자 확인용」이라 기본 제외
+      bobcatShortOffset: 2,      // 확정(2026-09-30): 밥캣도 결품일 − 2일
+      engineMode: 'override',    // 확정(2026-09-30): 엔진 결품과 납품예정에 같은 품번 → 결품 기준(납품예정 미반영) | sum = 둘 다
+      collectDirect: true,       // 확정(2026-09-30): 직송 파일(인천건기·엔진, 밥캣 직송)도 납품예정과 같게 수주로 넣음
       monthBuckets: true,        // 누적결품의 월 단위 칸(11·12·01…)도 결품으로 넣을지
       shortMode: 'increment',    // increment = 날짜별 늘어난 결품만큼 한 줄씩 | single = 최대 결품을 첫 결품일 한 줄로
-      poAllSheets: false,        // 발주서 파일에 시트가 여럿이면 발주일자가 가장 늦은 시트만(false) / 전부(true)
+      poAllSheets: false,        // 확정(2026-09-30): 발주서 파일에 시트가 여럿이면 최근(발주일자가 가장 늦은) 시트만 / 전부(true)
       portalCustomer: '포털 고객사', // 건기·엔진·AM·CKD 파일의 고객사 이름(파일에 이름이 없어 사용자가 적음)
       bobcatCustomer: '밥캣'
     };
   }
+  /** 브라우저에 저장돼 있던 설정 불러오기: 규칙 판이 예전이면 이번에 확정된 칸만 새 기본값으로 되돌림 */
+  function upgradeOptions(saved) {
+    if (!saved || typeof saved !== 'object') return mergeOptions(null);
+    if (saved.rulesVersion === RULES_VERSION) return mergeOptions(saved);
+    var o = Object.assign({}, saved);
+    RESET_ON_UPGRADE.forEach(function (k) { delete o[k]; });
+    return mergeOptions(o);
+  }
   function mergeOptions(o) {
     var d = defaultOptions();
-    if (o && typeof o === 'object') Object.keys(d).forEach(function (k) { if (o[k] !== undefined && o[k] !== null) d[k] = o[k]; });
+    if (o && typeof o === 'object') Object.keys(d).forEach(function (k) { if (k !== 'rulesVersion' && o[k] !== undefined && o[k] !== null) d[k] = o[k]; });
     d.engineShortOffset = Math.max(0, Math.min(30, Math.floor(Number(d.engineShortOffset) || 0)));
     d.bobcatShortOffset = Math.max(0, Math.min(30, Math.floor(Number(d.bobcatShortOffset) || 0)));
     d.engineMode = d.engineMode === 'sum' ? 'sum' : 'override';
@@ -277,6 +289,7 @@
         var writeDate = f.cls.date || (dc.cols[0] && dc.cols[0].date) || null; // 요청 ②: 가능하면 작성일자 → 발주일자
         if (reference) rep.notes.push('요청 ①: 건기 누적결품은 참고자료라 수집하지 않습니다');
         else if (!isBob && f.cls.group !== '엔진') rep.notes.push(f.cls.group + ' 누적결품 규칙이 원문에 없어 엔진과 같은 규칙으로 넣었습니다(확인 부탁)');
+        if (isBob && offset) rep.notes.push('밥캣 결품일 기준 납기를 ' + offset + '일 당겼습니다(2026-09-30 확정: 결품일 − 2일)');
         for (var r = startRow; r < aoa.length; r++) {
           var line = aoa[r] || [];
           if (blankRow(line)) continue;
@@ -319,7 +332,7 @@
             var it = str(ln[mp.item]);
             if (!it) { check(f.name, r2 + 1, '품목코드가 빈 행', ''); continue; }
             rep.read++;
-            if (isDirect && !o.collectDirect) { exclude(rep, '직송 — 작업자 확인용(수집 안 함 설정)'); continue; }
+            if (isDirect && !o.collectDirect) { exclude(rep, '직송 — 수집 안 함 설정'); continue; }
             var ot = mp.orderType >= 0 ? str(ln[mp.orderType]) : '';
             if (f.cls.group === '엔진' && /^mass\s*po$/i.test(ot)) { exclude(rep, '오더유형 Mass PO(요청 ② — 엔진 납품예정 제외)'); continue; }
             var q = num(ln[mp.qty]), due = parseDate(ln[mp.due]);
@@ -332,8 +345,9 @@
             var row = add(f, rep, r2 + 1, { item: it, name: str(ln[mp.name]), qty: q, due: due, orderDate: mp.orderDate >= 0 ? parseDate(ln[mp.orderDate]) : null, rule: isDirect ? '직송' : '납품예정', note: extra.join(' · ') });
             if (f.cls.group === '엔진') enginePlanRows.push({ row: row, rep: rep });
           }
-          if (isDirect && !o.collectDirect) rep.notes.push('직송 파일은 기본으로 수집하지 않습니다(밥캣 매크로 문서: 직송은 작업자 확인용). 화면에서 바꿀 수 있습니다(확인 부탁)');
-          if (f.cls.group === 'AM' || f.cls.group === 'CKD') rep.notes.push(f.cls.group + ' 규칙이 원문에 없어 건기 납품예정과 같이(납품잔량·납기일자) 넣었습니다(확인 부탁)');
+          if (isDirect && !o.collectDirect) rep.notes.push('직송 수집을 끈 설정이라 넣지 않았습니다(2026-09-30 확정 기본값은 납품예정과 같이 넣음)');
+          else if (isDirect) rep.notes.push('직송도 납품예정과 같은 규칙으로 수주에 넣었습니다(2026-09-30 확정)');
+          if (f.cls.group === 'AM' || f.cls.group === 'CKD') rep.notes.push(f.cls.group + ' 는 건기 납품예정과 같이(납품잔량·납기일자) 넣었습니다(2026-09-30 확정)');
         }
         return;
       }
@@ -361,7 +375,7 @@
         var it = str(ln[mp.item]);
         if (!it) { check(f.name, r + 1, '품번이 빈 행', ''); continue; }
         rep.read++;
-        if (x.direct && !o.collectDirect) { exclude(rep, '직송 — 작업자 확인용(매크로 규칙, 수집 안 함 설정)'); continue; }
+        if (x.direct && !o.collectDirect) { exclude(rep, '직송 — 수집 안 함 설정'); continue; }
         if (bobcatShortItems[it]) { exclude(rep, '누적결품(위블록) 품번과 겹침 — 결품 값 우선(매크로 규칙)'); continue; }
         var q = num(ln[mp.qty]), due = parseDate(ln[mp.due]);
         if (q === null) { check(f.name, r + 1, '수량을 읽지 못함', colName(mp.qty) + '「' + str(ln[mp.qty]) + '」'); continue; }
@@ -373,7 +387,8 @@
         if (c !== due) notes.push('원납기 ' + due + ' → ' + c + (c === base ? '(과거 → 기준일)' : '(마지막 날짜로 조임)'));
         add(f, rep, r + 1, { item: it, name: str(ln[mp.name]), qty: q, due: c, originalDue: due, orderDate: mp.orderDate >= 0 ? parseDate(ln[mp.orderDate]) : null, rule: x.direct ? '밥캣 직송' : '밥캣 납품예정', note: notes.join(' · ') });
       }
-      if (x.direct && !o.collectDirect) rep.notes.push('밥캣 직송은 매크로에 들어가지 않는 작업자 확인용이라 수집하지 않습니다');
+      if (x.direct && !o.collectDirect) rep.notes.push('직송 수집을 끈 설정이라 넣지 않았습니다(2026-09-30 확정 기본값은 넣음)');
+      else if (x.direct) rep.notes.push('밥캣 직송도 납품예정 일반과 같은 규칙(위블록 겹침 제외·원납기 조임)으로 넣었습니다(2026-09-30 확정)');
     });
 
     rows.sort(function (a, b) { return a.due.localeCompare(b.due) || a.item.localeCompare(b.item) || a.source.localeCompare(b.source); });
@@ -390,6 +405,8 @@
   }
 
   // ── 3-4. 선적계획·창고별재고현황 → 기존 입력 ③·② ────────
+  /** 사내 완제품 품번: 품목코드 안에 「완제품」 글자가 든 것(앞·뒤·[완제품] 모두). 글자는 떼지 않습니다 */
+  function isFinishedCode(code) { return /완제품/.test(str(code)); }
   function processSide(f, t, check) {
     var rep = Report(f, TYPE_LABEL[t]);
     var lay = LAYOUTS[t];
@@ -398,7 +415,7 @@
     f.sheets.names.some(function (n) { var mm = pick(f.sheets.sheets[n] || [], lay); if (mm) { nm = n; m = mm; return true; } return false; });
     if (!m) { check(f.name, '', '머리행을 찾지 못함', '필요한 열: ' + lay.need.join(', ')); f._side = []; return rep; }
     rep.sheet = nm;
-    var aoa = f.sheets.sheets[nm], out = [];
+    var aoa = f.sheets.sheets[nm], out = [], finished = 0;
     for (var r = m.hr + 1; r < aoa.length; r++) {
       var ln = aoa[r] || [];
       if (blankRow(ln)) continue;
@@ -424,7 +441,9 @@
       } else {
         var s = num(ln[m.qty]);
         if (s === null) { check(f.name, r + 1, '합계(재고)를 읽지 못함', '「' + str(ln[m.qty]) + '」'); continue; }
-        if (/[가-힣]/.test(raw)) check(f.name, r + 1, '품목코드에 한글이 붙어 있음', '「' + raw + '」 — 수주 품번과 맞지 않을 수 있습니다');
+        // 확정(2026-09-30): 「완제품」이 붙은 품번은 사내 완제품 품번 — 떼지 않고 그대로, 정확히 같은 품번끼리만 맞춥니다
+        if (isFinishedCode(raw)) finished++;
+        else if (/[가-힣]/.test(raw)) check(f.name, r + 1, '품목코드에 한글이 붙어 있음', '「' + raw + '」 — 수주 품번과 맞지 않을 수 있습니다');
         var sf = m.safety >= 0 ? num(ln[m.safety]) : null;
         out.push({ item: raw, name: str(ln[m.name]), current: s, available: null, safety: sf, row: r + 1 });
       }
@@ -433,7 +452,10 @@
     if (t === 'shipplan') {
       var stripped = out.filter(function (x) { return x.originalItem !== x.item; }).length;
       rep.notes.push('품목코드 끝 (CI) ' + stripped + '건 삭제 · 미판매수량 → 선적수량 · 변경선적요청일 → 중국 선적예정일로 넘깁니다');
-    } else rep.notes.push('합계 → 현재고로 넘깁니다' + (m.safety >= 0 ? ' · 안전재고 열도 함께' : ''));
+    } else {
+      rep.notes.push('합계 → 현재고로 넘깁니다' + (m.safety >= 0 ? ' · 안전재고 열도 함께' : ''));
+      if (finished) rep.notes.push('「완제품」이 붙은 사내 완제품 품번 ' + finished + '개는 그대로 넣었습니다(2026-09-30 확정 — 떼지 않음)');
+    }
     f._side = out;
     return rep;
   }
@@ -679,11 +701,11 @@
   }
 
   return {
-    defaultOptions: defaultOptions, mergeOptions: mergeOptions, classify: classify, fileDate: fileDate, customerFromName: customerFromName,
+    defaultOptions: defaultOptions, mergeOptions: mergeOptions, upgradeOptions: upgradeOptions, classify: classify, fileDate: fileDate, customerFromName: customerFromName,
     TYPE_LABEL: TYPE_LABEL, LAYOUTS: LAYOUTS, PO_LIST: PO_LIST,
     shortageSteps: shortageSteps, shortDateCols: shortDateCols, clampDue: clampDue, detectPo: detectPo, parsePdfOrder: parsePdfOrder,
     process: process, rowsAoa: rowsAoa, ordersAoa: ordersAoa, exportSheets: exportSheets, summary: summary, excludedText: excludedText, excludedCount: excludedCount,
-    fixZip: fixZip, num: num, colName: colName
+    fixZip: fixZip, num: num, colName: colName, isFinishedCode: isFinishedCode, RULES_VERSION: RULES_VERSION
   };
 
   // ── xlsx 안 XML 의 「<si >」 같은 공백 태그 고치기 ─────────

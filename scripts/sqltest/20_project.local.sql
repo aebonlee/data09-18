@@ -161,6 +161,8 @@ begin
   insert into public.intake_setting default values;
   perform public._assert_eq((select engine_short_offset from public.intake_setting), 2, '엔진 결품 납기 당김 기본값은 요청 ② 의 2일이다');
   perform public._assert_eq((select engine_mode from public.intake_setting), 'override', '결품·납품예정 겹침 기본값은 결품 우선이다');
+  perform public._assert_eq((select bobcat_short_offset from public.intake_setting), 2, '밥캣 결품 납기 당김 기본값은 2일이다(2026-09-30 확정)');
+  perform public._assert_eq((select collect_direct from public.intake_setting), true, '직송 수집 기본값은 넣음이다(2026-09-30 확정)');
   insert into public.intake_batch (base_date, options, file_count, row_count, check_count, is_sample)
     values ('2026-09-29', '{"engineShortOffset":2}', 25, 38, 6, true) returning id into v_b;
   perform set_config('test.a_batch', v_b::text, false);

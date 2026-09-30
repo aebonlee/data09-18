@@ -206,17 +206,21 @@ create table if not exists public.intake_setting (
   owner_id             uuid primary key default auth.uid(),
   base_date            date,                                          -- 비우면 파일 이름 날짜 → 오늘
   engine_short_offset  int not null default 2 check (engine_short_offset between 0 and 30),  -- 요청 ②: 결품일 − 2일
-  bobcat_short_offset  int not null default 0 check (bobcat_short_offset between 0 and 30),
-  engine_mode          text not null default 'override' check (engine_mode in ('override', 'sum')),  -- 결품 우선 | 합산
-  collect_direct       boolean not null default false,                -- 직송 파일 수집
+  bobcat_short_offset  int not null default 2 check (bobcat_short_offset between 0 and 30),  -- 확정(2026-09-30): 결품일 − 2일
+  engine_mode          text not null default 'override' check (engine_mode in ('override', 'sum')),  -- 확정(2026-09-30): 결품 기준 | 합산
+  collect_direct       boolean not null default true,                 -- 확정(2026-09-30): 직송도 납품예정과 같이 수집
   month_buckets        boolean not null default true,                 -- 누적결품 월 단위 칸
   short_mode           text not null default 'increment' check (short_mode in ('increment', 'single')),
-  po_all_sheets        boolean not null default false,                -- 발주서 시트 전부 / 가장 늦은 시트만
+  po_all_sheets        boolean not null default false,                -- 발주서 시트 전부 / 최근 시트만(확정 2026-09-30)
   portal_customer      text not null default '포털 고객사',
   bobcat_customer      text not null default '밥캣',
   created_at           timestamptz not null default now(),
   updated_at           timestamptz not null default now()
 );
+-- 2026-09-30 수강생 답으로 바뀐 기본값 — 이미 만들어진 표에도 반영(재실행 안전, 저장된 행은 그대로)
+alter table public.intake_setting alter column bobcat_short_offset set default 2;
+alter table public.intake_setting alter column collect_direct set default true;
+
 
 -- 취합 한 번 (파일 묶음)
 create table if not exists public.intake_batch (

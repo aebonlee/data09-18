@@ -331,10 +331,31 @@ test('밥캣: 원납기를 [기준일 ~ 결품 마지막 날짜]로 조임, 결�
   assert.equal(repOf(RS, /밥캣 일반/).excluded['누적결품(위블록) 품번과 겹침 — 결품 값 우선(매크로 규칙)'], 1);
   assert.equal(RS.lastBobcatDate, '2026-10-22');
 });
-test('직송: 기본 수집 안 함(작업자 확인용), 켜면 납품예정 규칙대로(엔진 직송은 Mass PO 라 빠짐)', () => {
-  assert.equal(rowsOf(RS, /직송/).length, 0);
-  const d = I.process(IS.asInput(), { collectDirect: true }, NOW);
-  assert.deepEqual(rowsOf(d, /직송/).map((r) => r.item).sort(), ['SMP-B706', 'SMP-C105']);
+test('직송(확정 2026-09-30): 기본으로 납품예정과 같이 넣음(엔진 직송은 Mass PO 라 빠짐), 끄면 빠짐', () => {
+  assert.deepEqual(rowsOf(RS, /직송/).map((r) => r.item).sort(), ['SMP-B706', 'SMP-C105']);
+  assert.equal(repOf(RS, /직송 인천엔진/).excluded['오더유형 Mass PO(요청 ② — 엔진 납품예정 제외)'], 1);
+  const off = I.process(IS.asInput(), { collectDirect: false }, NOW);
+  assert.equal(rowsOf(off, /직송/).length, 0);
+});
+test('밥캣 결품(확정 2026-09-30): 납기 = 결품일 − 2일, 0 으로 바꾸면 결품일 그대로', () => {
+  const b = rowsOf(RS, /누적결품 밥캣/);
+  assert.deepEqual(b.map((r) => [r.item, r.shortDate, r.due]), [['SMP-B702', '2026-10-01', '2026-09-29'], ['SMP-B701', '2026-10-06', '2026-10-04'], ['SMP-B701', '2026-10-08', '2026-10-06']]);
+  const z = I.process(IS.asInput(), { bobcatShortOffset: 0 }, NOW);
+  assert.ok(rowsOf(z, /누적결품 밥캣/).every((r) => r.due === r.shortDate));
+});
+test('재고 품번의 「완제품」(확정 2026-09-30): 떼지 않고 그대로, ★확인 없이 정확히 같은 품번끼리만 맞춤', () => {
+  assert.ok(RS.stock.some((x) => x.item === 'SMP-C103-완제품'));
+  assert.ok(!RS.stock.some((x) => x.item === 'SMP-C103'));
+  assert.ok(!RS.checks.some((c) => /한글/.test(c.reason)));
+  assert.ok(I.isFinishedCode('ABC-1[완제품]') && I.isFinishedCode('완제품ABC') && !I.isFinishedCode('ABC-1'));
+  const res = L.compute({ orders: [{ item: 'SMP-C103', name: '', customer: '', orderDate: null, dueDate: '2026-10-02', qty: 3 }], stock: RS.stock, shipments: [] }, { baseDate: '2026-09-29' });
+  assert.equal(res.results.find((r) => r.item === 'SMP-C103').stock, 0); // 완제품 품번 재고와 합치지 않음
+});
+test('저장된 예전 설정(판 없음)은 이번에 확정된 칸만 새 기본값으로, 나머지 설정은 유지', () => {
+  const up = I.upgradeOptions({ collectDirect: false, bobcatShortOffset: 0, engineMode: 'sum', poAllSheets: true, monthBuckets: false, portalCustomer: '우리 고객' });
+  assert.deepEqual([up.collectDirect, up.bobcatShortOffset, up.engineMode, up.poAllSheets, up.monthBuckets, up.portalCustomer], [true, 2, 'override', false, false, '우리 고객']);
+  const keep = I.upgradeOptions(Object.assign(I.defaultOptions(), { collectDirect: false }));
+  assert.equal(keep.collectDirect, false); // 새 판에서 사용자가 끈 것은 그대로
 });
 test('발주서: 목록형은 잔량 열, 서식형은 납기일 칸·날짜별 칸, 가장 늦은 시트만(설정으로 전부)', () => {
   assert.deepEqual(rowsOf(RS, /고객사A_/).map((r) => [r.item, r.qty, r.due, r.orderDate]), [['SMP-P801', 20, '2026-10-02', '2026-09-14'], ['SMP-P802', 40, '2026-10-12', '2026-09-24']]);
@@ -357,7 +378,7 @@ test('빠뜨리지 않기: 파일마다 읽은 행 = 수집 + 규칙 제외 + �
     const multi = /고객사E_/.test(f.file) ? 1 : 0; // P841 한 행이 날짜 두 칸으로 두 줄
     assert.equal(f.collected + I.excludedCount(f) + ck, f.read + multi, f.file);
   });
-  assert.equal(RS.rows.length, 38); assert.equal(RS.checks.length, 6);
+  assert.equal(RS.rows.length, 40); assert.equal(RS.checks.length, 5);
 });
 
 console.log('수주 취합 — 파일 읽기·넘기기');
