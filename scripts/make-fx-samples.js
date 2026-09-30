@@ -50,6 +50,15 @@ const wb2 = XLSX.utils.book_new();
 XLSX.utils.book_append_sheet(wb2, XLSX.utils.aoa_to_sheet(buy), '매입단가표');
 fs.writeFileSync(path.join(out, '매입단가표_통화칸_예시.xlsx'), XLSX.write(wb2, { bookType: 'xlsx', type: 'buffer' }));
 
+// 4. 완제품정보 예시(가상) — samples/예시데이터_완제품정보.xlsx (기획서 11.16). 받은 파일과 같이 3행 머리 · B열부터
+const IS = require('../js/intake-sample.js');
+const Pd = require('../js/product.js');
+const wb3 = XLSX.utils.book_new();
+const pAoa = IS.PRODUCT_INFO.Sheet1.map((r) => r.slice());
+XLSX.utils.book_append_sheet(wb3, XLSX.utils.aoa_to_sheet(pAoa), 'Sheet1');
+const pFile = path.join(__dirname, '..', 'samples', '예시데이터_완제품정보.xlsx');
+fs.writeFileSync(pFile, XLSX.write(wb3, { bookType: 'xlsx', type: 'buffer' }));
+
 // 다시 읽어 확인
 function book(file) {
   const w = XLSX.read(fs.readFileSync(file), { type: 'buffer', cellDates: true });
@@ -66,3 +75,7 @@ const ok = a.stats.pairs === 9 && a.rates['CNY|' + lastCny].raw === rates.curren
   && c.stats.pairs === 6 && c.map['SMP-C101'].cur === 'CNY' && c.map['SMP-E301'].cur === 'CNY' && c.map['SMP-A502'].cur === 'USD' && !c.map['CH-E305'].cur && !c.map['CH-K601'].cur;
 console.log('양식 예시', a.stats.pairs, '· 복사 형식', b.stats.pairs, '· 매입단가표', c.stats.pairs, ok ? '— 다시 읽기 일치' : '— 불일치');
 if (!ok) process.exit(1);
+const pd = Pd.parseBook(book(pFile)), pd0 = Pd.parseBook(IS.productBook());
+const ok2 = pd.stats.items === pd0.stats.items && pd.stats.items === 9 && pd.map['SMP-G202'].cur === 'CNY' && pd.map['SMP-G202'].implied === 230;
+console.log('완제품정보 예시', pd.stats.items, '품번 · 발주단가', pd.stats.withBuy, ok2 ? '— 다시 읽기 일치' : '— 불일치');
+if (!ok2) process.exit(1);

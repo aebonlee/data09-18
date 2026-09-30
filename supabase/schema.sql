@@ -14,7 +14,7 @@
 --  본인 프로젝트에 올리는 것을 전제로 하므로 테이블 이름에 접두사를 붙이지 않았습니다.
 --  회사 공용 URL·키는 어디에도 들어 있지 않습니다.
 --
---  테이블 (18개)
+--  테이블 (19개)
 --    app_members        — 팀 구성원과 역할 (admin=생산관리 담당자 / member=구매·물류 담당자, 읽기 전용)
 --    source_file        — 올린 엑셀 한 벌 (dataset: orders 수주 / stock 재고 / shipments 선적예정)
 --    order_line         — 수주현황 한 행 (품번·품명·고객사·수주일·납기일·수주수량)
@@ -41,6 +41,8 @@
 --    intake_monthly_summary (뷰) — 월별 수주 vs 매입(납기월(확정)·발주월 × 수주금액·매입금액·단가 없음 행 수·비중·차액·차익률), 기획서 11.13·11.14
 --    ── 환율 (기획서 11.15, 2026-09-30 China(RMB) 요청) ──
 --    fx_rate            — 월평균 환율(통화 · 연월 · 값 · 단위 · 출처: 직접입력 / 기준파일 / 자동(서울외국환중개))
+--    ── 완제품정보 (기획서 11.16) ──
+--    product_info       — 천일품번 마스터(특이사항 · 조립처 · 회로수 · 고객사 · 판매단가 · 통화 · 발주단가 · 발주단가(원화) · 생산처). 매입단가 순서: 매입단가표 > 완제품정보 > 직접입력
 --    intake_order_line 의 sale_currency · sale_price_orig · sale_fx_rate · buy_currency · buy_price_orig · buy_fx_rate · fx_month — 외화 단가의 원래 값과 쓴 환율
 --
 --  접근 규칙
@@ -327,10 +329,10 @@ do $c$ begin
     alter table public.intake_order_line add constraint intake_order_line_buy_price_check
       check (buy_price is null or buy_price > 0);
   end if;
-  if not exists (select 1 from pg_constraint where conname = 'intake_order_line_buy_source_check') then
-    alter table public.intake_order_line add constraint intake_order_line_buy_source_check
-      check (buy_source in ('', '단가표', '직접입력') and ((buy_price is null) = (buy_source = '')));
-  end if;
+  -- 2026-09-30 완제품정보(기획서 11.16): 출처에 「완제품정보」를 더함 — 재실행 안전하게 지우고 다시 건다
+  alter table public.intake_order_line drop constraint if exists intake_order_line_buy_source_check;
+  alter table public.intake_order_line add constraint intake_order_line_buy_source_check
+    check (buy_source in ('', '단가표', '완제품정보', '직접입력') and ((buy_price is null) = (buy_source = '')));
   if not exists (select 1 from pg_constraint where conname = 'intake_order_line_buy_amount_check') then
     alter table public.intake_order_line add constraint intake_order_line_buy_amount_check
       check (buy_amount is null or (buy_price is not null and buy_amount = round(qty * buy_price, 2)));
@@ -388,6 +390,33 @@ create table if not exists public.fx_rate (
   updated_at   timestamptz not null default now(),
   -- ⚠ upsert 시 onConflict: 'owner_id,source,currency,rate_month'
   constraint fx_rate_key unique (owner_id, source, currency, rate_month)
+);
+
+-- 완제품정보 (기획서 11.16) — 회사 완제품정보 파일의 한 줄(천일품번마다 한 줄, 같은 품번이 여러 줄이면 위쪽 줄). 값 0 은 빈칸(null · '')으로 넣는다
+--   currency    — 통화 칸(China(RMB) → CNY). 칸이 비었는데 발주단가(원화) ÷ 발주단가 ≠ 1 이면 CNY 로 추정(currency_source = '원화 칸으로 추정')
+--   implied_rate — 파일 환율 = 발주단가(원화) ÷ 발주단가(받은 파일은 230). 월평균 환산과 나란히 보기 위해 남긴다
+create table if not exists public.product_info (
+  id               bigint generated always as identity primary key,
+  owner_id         uuid not null default auth.uid(),
+  item             text not null check (length(btrim(item)) > 0),     -- 천일품번(대문자 · 공백 없앤 열쇠)
+  note             text not null default '',                           -- 특이사항(「단종」「생산금지」 → 수주 결과에 표시)
+  assembler        text not null default '',                           -- 조립처
+  circuits         text not null default '',                           -- 회로수
+  customer         text not null default '',                           -- 고객사
+  sale_price       numeric check (sale_price is null or sale_price > 0),
+  currency         text not null default '' check (currency in ('', 'KRW', 'CNY', 'USD', 'JPY', 'EUR')),
+  currency_source  text not null default '' check (currency_source in ('', '통화 칸', '원화 칸으로 추정', '원화 칸 = 발주단가')),
+  buy_price        numeric check (buy_price is null or buy_price > 0),
+  buy_price_krw    numeric check (buy_price_krw is null or buy_price_krw > 0),
+  implied_rate     numeric generated always as (case when buy_price > 0 and buy_price_krw > 0 then round(buy_price_krw / buy_price, 4) end) stored,
+  maker            text not null default '',                           -- 생산처
+  is_stopped       boolean generated always as (note ~ '단종|생산\s*금지') stored,
+  source_file      text not null default '',
+  source_row       int check (source_row > 0),
+  created_at       timestamptz not null default now(),
+  updated_at       timestamptz not null default now(),
+  -- ⚠ upsert 시 onConflict: 'owner_id,item'
+  constraint product_info_item_key unique (owner_id, item)
 );
 
 -- 월별 수주 vs 매입 (기획서 11.13, 2026-09-30 세 번째 답변의 새 요청 — 화면 「월별 수주 vs 매입」, js/monthly.js 와 같은 계산)
@@ -596,7 +625,7 @@ begin
   foreach t in array array['app_members', 'source_file', 'order_line', 'stock_line', 'shipment_line',
                            'column_mapping', 'app_settings', 'plan_edit', 'ai_note',
                            'intake_setting', 'intake_batch', 'intake_order_line', 'intake_file', 'intake_check',
-                           'part_mapping', 'upload_setting', 'price_master', 'fx_rate']
+                           'part_mapping', 'upload_setting', 'price_master', 'fx_rate', 'product_info']
   loop
     execute format('drop trigger if exists %I on public.%I', t || '_updated_at', t);
     execute format('create trigger %I before update on public.%I for each row execute function public.set_updated_at()',
@@ -628,6 +657,7 @@ alter table public.part_mapping      enable row level security;
 alter table public.upload_setting    enable row level security;
 alter table public.price_master      enable row level security;
 alter table public.fx_rate           enable row level security;
+alter table public.product_info      enable row level security;
 
 -- 3-1. 팀 구성원 : 본인 행은 본인이 보고, 전체 목록과 등록·변경·해제는 admin 만
 drop policy if exists app_members_select on public.app_members;
@@ -648,7 +678,7 @@ do $rls$
 declare t text;
 begin
   foreach t in array array['source_file', 'column_mapping', 'app_settings', 'plan_edit', 'ai_note',
-                           'intake_setting', 'intake_batch', 'part_mapping', 'upload_setting', 'price_master', 'fx_rate']
+                           'intake_setting', 'intake_batch', 'part_mapping', 'upload_setting', 'price_master', 'fx_rate', 'product_info']
   loop
     execute format('drop policy if exists %I on public.%I', t || '_select', t);
     execute format('drop policy if exists %I on public.%I', t || '_insert', t);

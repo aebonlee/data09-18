@@ -243,9 +243,25 @@
     ['SMP-A502', '', '포털 고객사', 'AM', '', 'D-300', '예시 납품처 안산', ''],
     ['CH-B704', 'SMP-B704', '밥캣', '밥캣', '', 'B-10', '예시 납품처 밥캣', '담당자C']] };
   function partiesBook() { return { names: Object.keys(ITEM_PARTIES), sheets: ITEM_PARTIES }; }
+  // ── 완제품정보 예시(기획서 11.16) — 가상 품번·가상 고객사·가상 단가. 받은 파일과 같은 모양: 1·2행 비움, 3행 머리, B열부터, 빈칸은 0
+  //    발주단가(원화) = 발주단가 × 230(받은 파일의 모양 그대로), 통화 칸이 빈 위안 줄도 있음
+  var PRODUCT_INFO = { 'Sheet1': [[], [],
+    ['', '천일 품번', '특이사항', '조립처', '회로수', '고객사', '판매단가', '통화', '발주단가', '발주단가(원화)', '생산처'],
+    ['', 'SMP-B703', 0, '조립처가(가상)', 12, '예시고객사B', '', 'China(RMB)', 30, 6900, '생산처A(가상)'],
+    ['', 'SMP-G202', 0, '조립처나(가상)', 8, '예시고객사A', '', '', 12.5, 2875, '생산처B(가상)'],
+    ['', 'SMP-P811', '생산금지 예정 — 단종(가상)', '조립처가(가상)', 20, '예시고객사C', '', 'China(RMB)', 40, 9200, '생산처A(가상)'],
+    ['', 'SMP-C101', '국내 외주 전환(가상)', 0, 6, '예시고객사A', '', '', 9000, 9000, '국내외주(가상)'],
+    ['', 'SMP-E305', 0, 0, 0, '예시고객사A', '', '', 0, 0, 0],
+    ['', 'SMP-B705', 0, '조립처다(가상)', 10, '예시고객사B', '', 'China(RMB)', 25.5, 5865, '생산처C(가상)'],
+    ['', 'SMP-A501', '단종 예정', 0, 0, '예시고객사C', '', '', 0, 0, 0],
+    ['', 'SMP-X900', 0, 0, 4, 0, '', 'China(RMB)', 3, 690, '생산처A(가상)'],
+    ['', 'SMP-B703', 0, '조립처가(가상)', 12, '예시고객사B', '', 'China(RMB)', 31, 7130, '생산처B(가상)'],
+    ['', 'SMP-Z001', 0, 0, 0, 0, '', '', 0, 0, 0],
+    ['', '', '', '', '', '', '', '', '', '', '']] };
+  function productBook() { return { names: Object.keys(PRODUCT_INFO), sheets: PRODUCT_INFO }; }
   // ── ERP 업로드 양식 예시 — 머리행만(수강생 양식과 같은 17열). 열 이름은 일반 명칭입니다 ──
   var TEMPLATE_HEAD = ['일자', '순번', '추가문자형식1', '납품처 코드', '납품처명', '담당자', '납기일자', '품목코드(상단)', '작업지시No.',
     '품목코드', '품목명', 'BOM버전', '규격', '수량', '창고', '적요', '하위반제품수'];
 
-  return { BASE: BASE, files: files, asInput: asInput, PDF_ITEMS: PDF_ITEMS, MAPPING: MAPPING, mappingBook: mappingBook, TEMPLATE_HEAD: TEMPLATE_HEAD, BUY_PRICE_TABLE: BUY_PRICE_TABLE, priceBook: priceBook, ITEM_PARTIES: ITEM_PARTIES, partiesBook: partiesBook };
+  return { BASE: BASE, files: files, asInput: asInput, PDF_ITEMS: PDF_ITEMS, MAPPING: MAPPING, mappingBook: mappingBook, TEMPLATE_HEAD: TEMPLATE_HEAD, BUY_PRICE_TABLE: BUY_PRICE_TABLE, priceBook: priceBook, PRODUCT_INFO: PRODUCT_INFO, productBook: productBook, ITEM_PARTIES: ITEM_PARTIES, partiesBook: partiesBook };
 });

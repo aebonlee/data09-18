@@ -8,7 +8,9 @@
   var st = S.load();
   var partMap = S.loadMapping(); // 고객사 품번 → 천일품번 매핑표(이 브라우저에만 저장, 기획서 11.10)
   var priceTable = S.loadPriceTable(); // 매입단가표 당사 품목코드 → 매입단가·생산처(이 브라우저에만 저장, 기획서 11.12)
-  var Fx = window.SPFx;
+  var Fx = window.SPFx, Pd = window.SPProduct;
+  var product = S.loadProduct();       // 완제품정보(천일품번 마스터, 이 브라우저에만 저장, 기획서 11.16)
+  var productSaved = true;
   var fxFile = S.loadFxFile();         // 불러온 환율 기준 파일(이 브라우저에만 저장, 기획서 11.15)
   var autoRates = window.SPRates || null; // data/rates.js — 서울외국환중개 월평균(GitHub Actions 가 매일 갱신). 못 읽으면 null
   var autoTable = autoRates ? Fx.fromAuto(autoRates) : {};
@@ -458,7 +460,7 @@
       h('hr', { style: 'border:none;border-top:1px solid var(--line);margin:16px 0' }),
       h('button', { type: 'button', class: 'btn btn-danger', onclick: function () {
         if (!window.confirm('불러온 자료·설정·선적계획 수정·AI 답·수주 취합 결과·품번 매핑표·업로드 양식 설정을 모두 지웁니다. 계속할까요?')) return;
-        S.clear(); S.clearMapping(); S.clearPriceTable(); S.clearFxFile(); fxFile = null; partMap = null; priceTable = null; st = S.empty(); intakeFiles = null; intakeSide = { stock: null, shipments: null }; save(); render(); toast('모두 지웠습니다');
+        S.clear(); S.clearMapping(); S.clearPriceTable(); S.clearFxFile(); fxFile = null; S.clearProduct(); product = null; partMap = null; priceTable = null; st = S.empty(); intakeFiles = null; intakeSide = { stock: null, shipments: null }; save(); render(); toast('모두 지웠습니다');
       } }, '모두 지우기')));
   }
   function datasetCard(k) {
@@ -681,7 +683,8 @@
     var mi = M.apply(st.intake.rows, partMap, st.mapOpts);
     // 판매단가(고객 발주, 참고)는 원본 그대로, 매입단가(생산처 발주, 기획서 11.12)는 매입단가표 → 직접입력. 바꾸면 바로 반영
     // 외화 단가는 환율(기획서 11.15)로 원화로 바꿈: 직접입력 > 환율 기준 파일 > 자동(서울외국환중개), 납기월의 전월(설정) 평균
-    mi.price = Pr.apply(mi.rows, priceTable, st.manualBuy, { defaultCur: st.fx.defaultCur, manualCur: st.manualBuyCur, fx: { resolver: fxR(), mode: st.fx.mode } });
+    // 매입단가 순서: 매입단가표 > 완제품정보 발주단가 > 직접입력(기획서 11.16). 완제품정보는 고객사 · 특이사항(단종 · 생산금지)도 붙임
+    mi.price = Pr.apply(mi.rows, priceTable, st.manualBuy, { defaultCur: st.fx.defaultCur, manualCur: st.manualBuyCur, fx: { resolver: fxR(), mode: st.fx.mode }, product: product, productFallback: st.productOpts.fallbackKrw });
     mi.rows = mi.price.rows;
     return mi;
   }
@@ -850,6 +853,18 @@
         h('tbody', null, unmappedChecks.map(function (c) { return h('tr', null, h('td', null, M.GROUPS[c.group].label), h('td', { class: 'nowrap' }, h('strong', null, c.item)), h('td', null, c.detail), h('td', null, c.file)); }))))
         : h('p', { class: 'note' }, '매핑표에 없는 품번이 없습니다.')));
 
+    // 완제품정보 — 단종 · 생산금지 품번(기획서 11.16)
+    if (Pd.has(product)) {
+      var stops = {};
+      mi.rows.forEach(function (x) { if (x.productStop) { var k = x.company || x.item, e = stops[k] || (stops[k] = { item: k, note: x.productNote, rows: 0, qty: 0, customers: [] }); e.rows++; e.qty += x.qty; if (x.customer && e.customers.indexOf(x.customer) < 0) e.customers.push(x.customer); } });
+      var sl = Object.keys(stops).map(function (k) { return stops[k]; }).sort(function (a, b) { return b.qty - a.qty; });
+      main.appendChild(h('div', { class: 'card', id: 'intake-stop' }, h('h2', null, '★확인 필요 — 단종 · 생산금지 품번 ' + sl.length + '개 (완제품정보)'),
+        h('p', { class: 'note' }, '완제품정보의 특이사항에 「단종」「생산금지」가 적힌 품번이 이번 수주에 있습니다. 통합 수주 표에 「단종·생산금지」 표시, Excel 에 「완제품 특이사항」 열이 붙습니다. ', h('a', { href: '#/product' }, '완제품정보 보기')),
+        sl.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'list' },
+          h('thead', null, h('tr', null, ['천일품번', '특이사항', '고객사', '행 수', '수량'].map(function (x, i) { return h('th', { class: i >= 3 ? 'num' : null }, x); }))),
+          h('tbody', null, sl.map(function (e) { return h('tr', null, h('td', { class: 'nowrap' }, h('strong', null, e.item)), h('td', null, e.note), h('td', null, e.customers.join(', ')), h('td', { class: 'num' }, n(e.rows)), h('td', { class: 'num' }, n(e.qty))); }))))
+          : h('p', { class: 'note' }, '이번 수주에는 단종 · 생산금지 품번이 없습니다.')));
+    }
     main.appendChild(priceCard(mi));
 
     // 파일별 집계
@@ -893,10 +908,11 @@
         h('thead', null, h('tr', null, ['고객사', '공장', '구분', '품목코드', '천일품번', '수량', '판매단가(고객 발주)', '매입단가(생산처 발주)', '생산처', '매입금액'].concat(st.showMargin ? ['판매−매입'] : [], ['납기일', '발주일', '원본파일 / 행', '비고']).map(function (x) { return h('th', { class: /수량|단가|금액|판매−매입/.test(x) ? 'num' : null }, x); }))),
         h('tbody', null, rows.slice(0, LIMIT).map(function (x) {
           return h('tr', null, h('td', null, x.customer), h('td', null, x.plant), h('td', null, x.group), h('td', { class: 'nowrap' }, x.item),
-            h('td', { class: 'nowrap' }, h('strong', null, x.company), x.mapStatus === 'unmapped' || x.mapStatus === 'conflict' ? h('span', { class: 'tag warn' }, M.STATUS_LABEL[x.mapStatus]) : x.mapChosen ? h('span', { class: 'tag' }, '충돌에서 고름') : null),
+            h('td', { class: 'nowrap' }, h('strong', null, x.company), x.mapStatus === 'unmapped' || x.mapStatus === 'conflict' ? h('span', { class: 'tag warn' }, M.STATUS_LABEL[x.mapStatus]) : x.mapChosen ? h('span', { class: 'tag' }, '충돌에서 고름') : null,
+              x.productStop ? h('span', { class: 'tag warn', title: '완제품정보 특이사항: ' + x.productNote }, '단종·생산금지') : null),
             h('td', { class: 'num' }, n(x.qty)),
             h('td', { class: 'num nowrap note' }, x.price == null ? (x.saleFxMissing ? h('span', { class: 'tag warn', title: x.saleFxMissing.reason }, x.priceCur + ' ' + x.priceOrig + ' · 환율 없음') : '') : [n(x.price), x.priceSrc && x.priceSrc !== '원본' ? h('span', { class: 'tag' }, x.priceSrc) : null, x.saleFx ? h('span', { class: 'tag', title: Fx.describe(x.saleFx) }, x.saleFx.cur + ' ' + x.saleFx.orig) : null]),
-            h('td', { class: 'num nowrap' }, x.buyFxMissing ? h('span', { class: 'tag warn', title: x.buyFxMissing.reason }, x.buyCur + ' ' + x.buyPriceOrig + ' · 환율 없음') : x.buyPrice == null ? h('span', { class: 'tag warn' }, '매입단가 없음') : [n(x.buyPrice), x.buyFx ? h('span', { class: 'tag', title: Fx.describe(x.buyFx) }, x.buyFx.cur + ' ' + x.buyFx.orig + ' × ' + x.buyFx.raw + (x.buyFx.unit !== 1 ? '/' + x.buyFx.unit : '')) : null, x.buySrc === '직접입력' ? h('span', { class: 'tag' }, '직접입력') : null, x.buyMulti ? h('span', { class: 'tag', title: '매입단가표에 이 품목 단가가 둘 이상 — 가장 위쪽 단가(확정)' }, '단가 여럿·위쪽') : null]),
+            h('td', { class: 'num nowrap' }, x.buyFxMissing ? h('span', { class: 'tag warn', title: x.buyFxMissing.reason }, x.buyCur + ' ' + x.buyPriceOrig + ' · 환율 없음') : x.buyPrice == null ? h('span', { class: 'tag warn' }, '매입단가 없음') : [n(x.buyPrice), x.buyFx ? h('span', { class: 'tag', title: Fx.describe(x.buyFx) }, x.buyFx.cur + ' ' + x.buyFx.orig + ' × ' + x.buyFx.raw + (x.buyFx.unit !== 1 ? '/' + x.buyFx.unit : '')) : null, x.buySrc === '직접입력' || x.buySrc === '완제품정보' ? h('span', { class: 'tag' }, x.buySrc) : null, x.buyMulti ? h('span', { class: 'tag', title: '매입단가표에 이 품목 단가가 둘 이상 — 가장 위쪽 단가(확정)' }, '단가 여럿·위쪽') : null]),
             h('td', null, x.maker || ''),
             h('td', { class: 'num' }, x.buyAmount == null ? '' : n(x.buyAmount)),
             st.showMargin ? h('td', { class: 'num nowrap' }, x.margin == null ? '' : x.margin < 0 ? h('span', { class: 'tag warn' }, n(x.margin)) : n(x.margin)) : null,
@@ -1006,7 +1022,7 @@
     var saleText = Pr.SALE_ORDER.map(function (k) { return k + ' ' + n(ps.saleBySrc[k] || 0); }).join(' · ');
     return h('div', { class: 'card', id: 'intake-price' }, h('h2', null, '매입단가(생산처 발주) — 없음 ' + n(ps.buyNone) + '행 (' + n(ps.buyNoneItems) + '품목)'),
       h('p', { class: 'note' }, '매입단가는 당사가 생산처에 발주하는 단가로, 고객사 발주 단가와 무관합니다. 품목별 매입단가표(천일품번 → 매입단가, 생산처 선택)에서 찾고, 표에 없는 품목은 아래 목록에 직접 적습니다. 업로드 양식은 기존 17열 그대로라 매입단가·매입금액은 이 화면·통합 수주 Excel·「월별 수주 vs 매입」에서 봅니다. 매입단가표·직접 적은 값은 이 브라우저에만 저장합니다.'),
-      h('p', null, h('strong', null, '매입단가: '), '단가표 ' + n(ps.buyBySrc['단가표'] || 0) + ' · 직접입력 ' + n(ps.buyBySrc['직접입력'] || 0) + ' · 없음 ' + n(ps.buyNone) + ' · 매입금액 합계 ' + n(Math.round(ps.buyAmount))),
+      h('p', null, h('strong', null, '매입단가: '), '단가표 ' + n(ps.buyBySrc['단가표'] || 0) + (Pd.has(product) ? ' · 완제품정보 ' + n(ps.buyBySrc['완제품정보'] || 0) : '') + ' · 직접입력 ' + n(ps.buyBySrc['직접입력'] || 0) + ' · 없음 ' + n(ps.buyNone) + ' · 매입금액 합계 ' + n(Math.round(ps.buyAmount))),
       h('p', { class: 'note' }, h('strong', null, '판매단가(고객 발주, 참고): '), saleText + ' · 없음 ' + n(ps.saleNone) + ' · 판매금액 합계 ' + n(Math.round(ps.saleAmount)) + ' — 고객사 파일의 단가 칸 그대로입니다.'),
       h('div', { class: 'form-grid' },
         h('label', { class: 'field' }, h('span', null, Pr.has(t) ? '매입단가표 다시 넣기' : '매입단가표 넣기'), input,
@@ -1020,6 +1036,10 @@
         h('label', { class: 'field' }, h('span', null, '통화가 적히지 않은 매입단가의 통화'), defSel,
           h('small', null, '매입단가표에 「통화」 칸이 있거나 값이 「12.5 RMB」처럼 적혀 있으면 그 통화로 읽습니다. 칸이 없는 단가표가 모두 위안이면 China(RMB) 를 고르세요. 외화는 ', h('a', { href: '#/fx' }, '환율'), ' 화면의 기준으로 원화로 바꿉니다.'))),
       fxLine,
+      Pd.has(product) ? h('p', { class: 'note' }, h('strong', null, '완제품정보: '), '매입단가표에 없는 품번은 완제품정보의 발주단가 · 통화 · 생산처로 찾습니다(순서: 매입단가표 > 완제품정보 > 직접입력) — 이번 수주 ' + n(ps.buyBySrc['완제품정보'] || 0) + '행. ',
+        ps.fileKrwRows ? '완제품정보 파일의 원화 칸(고정 환율) 기준 매입금액 ' + n(Math.round(ps.fileKrwAmount)) + ' · 월평균 환율 기준 ' + n(Math.round(ps.fxKrwAmount)) + ' · 차이 ' + n(Math.round(ps.fxKrwAmount - ps.fileKrwAmount)) + ' (' + n(ps.fileKrwRows) + '행). ' : '',
+        ps.buyFileFallback ? '월평균이 없어 파일 원화 칸을 쓴 줄 ' + n(ps.buyFileFallback) + '행. ' : '',
+        h('a', { href: '#/product' }, '완제품정보 화면')) : null,
       tableInfo, conflictBox,
       st.showMargin ? h('p', { class: ps.negative ? 'alert warn' : 'note' }, '판매 − 매입: 두 단가가 모두 있는 ' + n(ps.both) + '행, 차이 금액 합계 ' + n(Math.round(ps.marginAmount)) + (ps.negative ? ' · 매입단가가 판매단가보다 높은 줄 ' + n(ps.negative) + '행(' + n(ps.negativeItems) + '품목) — 표에 빨간 표시' : '')) : null,
       Pr.has(t) ? h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn btn-danger', onclick: function () {
@@ -1270,6 +1290,29 @@
 
     var P = !monthlyPick ? T : S.months.filter(function (m) { return pickOf(m) === monthlyPick; })[0] || T;
     var label = !monthlyPick ? '전체 기간' : P.label;
+    // 고객사별 비교(기획서 11.16) — 최종 수주(매출) vs 발주(매입)를 고객사마다
+    var cbSel = h('select', { 'aria-label': '고객사 기준', onchange: function () { setMo('custBy', cbSel.value); } },
+      h('option', { value: 'order' }, Mo.CUST_BY.order), h('option', { value: 'product' }, Mo.CUST_BY.product));
+    cbSel.value = o.custBy;
+    var monSel2 = h('select', { 'aria-label': '고객사별 표의 월', onchange: function () { monthlyPick = monSel2.value; render(); var el = document.getElementById('monthly-customers'); if (el) el.scrollIntoView(); } },
+      h('option', { value: '' }, '전체 기간'), S.months.map(function (m) { return h('option', { value: pickOf(m) }, m.label); }));
+    monSel2.value = monthlyPick;
+    var cmax = 0;
+    (P.customers || []).forEach(function (c) { cmax = Math.max(cmax, c.sale, c.buy); });
+    function cbar(v, cls) { return h('span', { class: 'mbar ' + cls, style: 'width:' + (cmax ? Math.max(0, v) / cmax * 100 : 0) + '%' }); }
+    main.appendChild(h('div', { class: 'card', id: 'monthly-customers' }, h('h2', null, '고객사별 비교 — ' + label + ' · 수주금액 vs 발주금액(매입)'),
+      h('div', { class: 'form-grid' },
+        h('label', { class: 'field' }, h('span', null, '고객사 기준'), cbSel, h('small', null, '포털 파일은 고객사 이름이 없어 수주 쪽 고객사가 「' + (st.intakeOpts.portalCustomer || '포털 고객사') + '」 하나로 모입니다. 완제품정보를 넣었다면 「완제품정보의 고객사」로 바꿔 보세요(완제품정보에 적힌 고객사 · 사업부별로 나뉨).')),
+        h('label', { class: 'field' }, h('span', null, '보일 월'), monSel2)),
+      h('div', { class: 'table-wrap' }, h('table', { class: 'list' },
+        h('thead', null, h('tr', null, ['고객사', '수주금액', '발주금액(매입)', '비중(발주÷수주)', '수주단가 없음(행)', '매입단가 없음(행)'].concat(S.hasFx ? ['환율 없음(행)'] : [], ['행 수', '고객사 출처', '수주 · 매입']).map(function (x, i) { return h('th', { class: i >= 1 && i <= (S.hasFx ? 7 : 6) ? 'num' : null }, x); }))),
+        h('tbody', null, (P.customers || []).map(function (c) {
+          return h('tr', null, h('td', null, h('strong', null, c.customer)), h('td', { class: 'num nowrap' }, won(c.sale)), h('td', { class: 'num nowrap' }, won(c.buy)), h('td', { class: 'num nowrap' }, h('strong', null, rate(c.share))),
+            h('td', { class: 'num' }, c.saleNone ? h('span', { class: 'tag warn' }, n(c.saleNone)) : '0'), h('td', { class: 'num' }, c.buyNone ? h('span', { class: 'tag warn' }, n(c.buyNone)) : '0'),
+            S.hasFx ? h('td', { class: 'num' }, c.saleFx0 + c.buyFx0 ? h('span', { class: 'tag warn' }, n(c.saleFx0 + c.buyFx0)) : '0') : null,
+            h('td', { class: 'num' }, n(c.rows)), h('td', { class: 'note' }, Mo.fromText(c)), h('td', { class: 'mbars' }, cbar(c.sale, 'sale'), cbar(c.buy, 'buy')));
+        })))),
+      h('p', { class: 'note' }, '비중 = 그 고객사의 발주금액 합계 ÷ 수주금액 합계 × 100. 단가 · 환율이 없는 줄은 그쪽 합계에서 빠집니다. Excel 시트 「' + Mo.SHEET + '」에 고객사별 표와 월 × 고객사 표가 들어갑니다.')));
     main.appendChild(h('div', { class: 'card', id: 'monthly-detail' }, h('h2', null, '고객사 · 구분별 — ' + label),
       h('div', { class: 'form-grid' }, h('label', { class: 'field' }, h('span', null, '보일 월'), monSel)),
       h('div', { class: 'table-wrap' }, h('table', { class: 'list' },
@@ -1283,6 +1326,104 @@
             h('td', null, it.name || ''), h('td', null, it.customers.join(', '))].concat(numRow(it)));
         })))),
       h('p', { class: 'note' }, '품목은 천일품번(매핑 없으면 고객사 원품번)으로 묶습니다. 매입단가 없는 품목은 수주 취합 화면에서 단가표 양식으로 내려받아 채울 수 있습니다.')));
+  }
+
+  // ── 완제품정보 (기획서 11.16) ───────────────────────────
+  var productFilter = { q: '', customer: '', maker: '', assembler: '', note: '', cur: '', stop: false, buy: false, month: '' };
+  function setProduct(p, name) {
+    if (!p.list.length) { toast(p.problems[0] || '완제품정보에서 읽은 품번이 없습니다', true); return; }
+    product = Object.assign(p, { file: name, at: new Date().toISOString() });
+    productSaved = S.saveProduct(product);
+    render();
+    toast('완제품정보를 읽었습니다 — 품번 ' + n(p.stats.items) + '개 · 발주단가 ' + n(p.stats.withBuy) + '개' + (productSaved ? '' : ' (브라우저 저장 한도를 넘어 이 창에서만 씁니다)'), !productSaved);
+  }
+  function viewProduct() {
+    main.appendChild(h('div', { class: 'page-head' }, h('h1', null, '완제품정보 — 천일품번 마스터')));
+    main.appendChild(h('div', { class: 'alert info' },
+      '완제품정보 파일(천일 품번 · 특이사항 · 조립처 · 회로수 · 고객사 · 판매단가 · 통화 · 발주단가 · 발주단가(원화) · 생산처)을 넣으면 ',
+      '① 매입단가표에 없는 품번의 발주단가 · 통화 · 생산처를 채우고(순서: 매입단가표 > 완제품정보 > 직접입력) ② 수주 결과에 고객사 · 특이사항을 붙이며 「단종」「생산금지」 품번을 표시하고 ③ 월별 화면의 고객사별 비교에 고객사를 줍니다. ',
+      '위안(China(RMB)) 발주단가는 ', h('a', { href: '#/fx' }, '환율'), ' 화면의 월평균으로 원화로 바꾸고, 파일의 「발주단가(원화)」(고정 환율 값)와 나란히 보입니다. 이 브라우저에만 저장합니다.'));
+
+    var input = h('input', { type: 'file', accept: '.xlsx,.xls,.xlsm,.csv', 'aria-label': '완제품정보 파일' });
+    input.addEventListener('change', function () {
+      var f = input.files[0]; if (!f) return;
+      toast('완제품정보를 읽는 중입니다…');
+      readFile(f, function (err, book) { if (err) { toast('완제품정보를 읽지 못했습니다: ' + (err.message || err), true); return; } setProduct(Pd.parseBook(book), f.name); });
+    });
+    var fb = h('input', { type: 'checkbox', checked: st.productOpts.fallbackKrw, onchange: function () { st.productOpts = { fallbackKrw: fb.checked }; save(); render(); } });
+    var p = product, ps = p ? p.stats : null;
+    main.appendChild(h('div', { class: 'card' }, h('h2', null, '1. 완제품정보 넣기'),
+      h('div', { class: 'form-grid' },
+        h('label', { class: 'field' }, h('span', null, p ? '완제품정보 다시 넣기(바꾸기)' : '완제품정보 넣기'), input,
+          h('small', null, '머리행이 맨 위가 아니어도 됩니다(맨 위 20행 안에서 「천일 품번」 줄을 찾음). 값 0 은 빈칸으로 봅니다. 같은 천일품번이 여러 줄이면 위쪽 줄을 씁니다.'),
+          p ? null : h('button', { type: 'button', class: 'btn', style: 'margin-top:6px', onclick: function () { setProduct(Pd.parseBook(ISample.productBook()), '예시 완제품정보(가상 품번·가상 고객사)'); } }, '예시 완제품정보로 해 보기')),
+        h('label', { class: 'check field' }, fb, h('span', null, '월평균 환율이 없을 때 파일의 「발주단가(원화)」 쓰기'),
+          h('small', null, '파일의 원화 칸은 위안 × 고정 환율로 보입니다(아래 「파일 환율」). 켜면 월평균 환율이 없는 달의 줄에 이 값을 씁니다. 기본은 끔 — 회사 기준인지 확인 부탁'))),
+      p ? h('p', null, h('strong', null, '넣은 파일: '), (p.file || '') + ' · ' + String(p.at || '').slice(0, 16).replace('T', ' ') + ' · 시트 ' + (p.sheet || '') + ' · 읽은 열 ' + (p.cols || []).join(' · ')) : h('p', { class: 'note' }, '넣은 완제품정보가 없습니다. 예시: ', h('a', { href: 'samples/예시데이터_완제품정보.xlsx', download: '' }, '예시데이터_완제품정보.xlsx'), '(가상)'),
+      p && !productSaved ? h('p', { class: 'alert warn' }, '브라우저 저장 한도를 넘어 저장하지 못했습니다. 이 창을 닫으면 다시 넣어야 합니다.') : null,
+      p && (p.problems || []).length ? h('ul', { class: 'note' }, p.problems.slice(0, 10).map(function (x) { return h('li', null, x); })) : null,
+      p ? h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn btn-danger', onclick: function () {
+        if (!window.confirm('이 브라우저에 저장된 완제품정보를 지웁니다. 계속할까요?')) return;
+        S.clearProduct(); product = null; render(); toast('완제품정보를 지웠습니다');
+      } }, '완제품정보 지우기')) : null));
+    if (!p) return;
+
+    var impl = Object.keys(ps.implied || {}).sort(function (a, b) { return ps.implied[b] - ps.implied[a]; });
+    main.appendChild(h('div', { class: 'kpis' },
+      h('div', { class: 'kpi' }, h('div', { class: 'k' }, '품번'), h('div', { class: 'v' }, n(ps.items)), h('div', { class: 's' }, '읽은 줄 ' + n(ps.rows) + (ps.dup ? ' · 같은 품번 반복 ' + n(ps.dup) + '줄' : ''))),
+      h('div', { class: 'kpi' }, h('div', { class: 'k' }, '발주단가 있음'), h('div', { class: 'v' }, n(ps.withBuy)), h('div', { class: 's' }, '발주단가(원화) 있음 ' + n(ps.withKrw) + ' · 판매단가 있음 ' + n(ps.withSale))),
+      h('div', { class: 'kpi' }, h('div', { class: 'k' }, '통화'), h('div', { class: 'v' }, 'China(RMB) ' + n(ps.byCur.CNY || 0)), h('div', { class: 's' }, '통화 칸 ' + n((ps.byCur.CNY || 0) - (ps.curFromKrw || 0)) + ' · 빈 칸이지만 원화 칸으로 위안 추정 ' + n(ps.curFromKrw || 0) + ' · 원화 ' + n(ps.byCur.KRW || 0) + (ps.curBlankWithBuy ? ' · 통화 모름 ' + n(ps.curBlankWithBuy) : ''))),
+      h('div', { class: 'kpi' }, h('div', { class: 'k' }, '파일 환율(원화 ÷ 발주단가)'), h('div', { class: 'v' }, impl.length ? impl[0] : '-'), h('div', { class: 's' }, impl.slice(0, 4).map(function (k) { return k + ' → ' + n(ps.implied[k]) + '품번'; }).join(' · ') || '원화 칸 없음')),
+      h('div', { class: 'kpi' }, h('div', { class: 'k' }, '고객사 · 생산처 · 조립처'), h('div', { class: 'v' }, n(ps.customers) + ' · ' + n(ps.makers) + ' · ' + n(ps.assemblers)), h('div', { class: 's' }, '고객사가 적힌 품번 ' + n(ps.withCustomer))),
+      h('button', { type: 'button', class: 'kpi kpi-btn' + (ps.stop ? ' alert-kpi' : ''), onclick: function () { productFilter.stop = true; render(); } }, h('div', { class: 'k' }, '단종 · 생산금지'), h('div', { class: 'v' }, n(ps.stop) + '품번'), h('div', { class: 's' }, '특이사항에 「단종」「생산금지」 — 누르면 거르기'))));
+
+    // 원화 비교 기준 월
+    var R = fxR(), months = R.table().filter(function (e) { return e.cur === 'CNY'; }).map(function (e) { return e.month; });
+    if (!productFilter.month || months.indexOf(productFilter.month) < 0) productFilter.month = months[0] || '';
+    function rateFor(cur) { return productFilter.month ? R.find(cur, productFilter.month) : null; }
+    function opt(list, label) { return [h('option', { value: '' }, label)].concat(list.map(function (x) { return h('option', { value: x.value }, x.value + ' (' + n(x.count) + ')'); })); }
+    var f = productFilter;
+    var q = h('input', { type: 'search', value: f.q, placeholder: '천일품번 일부', 'aria-label': '품번 찾기' });
+    var cu = h('select', { 'aria-label': '고객사' }, opt(Pd.values(p, 'customer'), '전체 고객사')); cu.value = f.customer;
+    var mk = h('select', { 'aria-label': '생산처' }, opt(Pd.values(p, 'maker'), '전체 생산처')); mk.value = f.maker;
+    var asm = h('input', { type: 'search', value: f.assembler, placeholder: '조립처 글자', 'aria-label': '조립처' });
+    var nt = h('input', { type: 'search', value: f.note, placeholder: '예: 단종, 외주', 'aria-label': '특이사항' });
+    var cr = h('select', { 'aria-label': '통화' }, h('option', { value: '' }, '전체 통화'), h('option', { value: 'CNY' }, 'China(RMB)'), h('option', { value: 'KRW' }, '원화'), h('option', { value: 'none' }, '통화 모름(빈칸)')); cr.value = f.cur;
+    var stp = h('input', { type: 'checkbox', checked: f.stop }), buy = h('input', { type: 'checkbox', checked: f.buy });
+    var ms = h('select', { 'aria-label': '비교할 환율 월' }, months.length ? months.map(function (m) { return h('option', { value: m }, m); }) : h('option', { value: '' }, '환율 없음')); ms.value = f.month;
+    var holder = h('div'), LIMIT = 300;
+    function draw() {
+      f.q = q.value; f.customer = cu.value; f.maker = mk.value; f.assembler = asm.value; f.note = nt.value; f.cur = cr.value; f.stop = stp.checked; f.buy = buy.checked; f.month = ms.value;
+      var list = Pd.filter(p, f);
+      var cmp = list.map(function (e) { return Pd.compare(e, rateFor); }).filter(Boolean);
+      var sf = cmp.reduce(function (s, c) { return s + (c.fileKrw || 0); }, 0), sx = cmp.filter(function (c) { return c.fxKrw != null; }).reduce(function (s, c) { return s + c.fxKrw; }, 0);
+      holder.textContent = '';
+      holder.appendChild(h('div', { class: 'list-meta' }, h('span', null, n(list.length) + '품번' + (cmp.length ? ' · 외화 발주단가 ' + n(cmp.length) + '품번: 파일 원화 합 ' + n(Math.round(sf)) + ' / ' + (f.month || '-') + ' 월평균 원화 합 ' + n(Math.round(sx)) + ' / 차이 ' + n(Math.round(sx - sf)) + ' (1개씩 합, 수량 아님)' : '')),
+        list.length > LIMIT ? h('span', { class: 'note' }, '화면에는 앞 ' + LIMIT + '품번만 — 전체는 Excel') : null));
+      if (!list.length) { holder.appendChild(h('p', { class: 'empty' }, '조건에 맞는 품번이 없습니다.')); return; }
+      holder.appendChild(h('div', { class: 'table-wrap' }, h('table', { class: 'list' },
+        h('thead', null, h('tr', null, ['천일품번', '특이사항', '조립처', '회로수', '고객사', '생산처', '통화', '발주단가', '발주단가(원화) — 파일', '파일 환율', '월평균 원화', '차이'].map(function (x, i) { return h('th', { class: i === 3 || i >= 7 ? 'num' : null }, x); }))),
+        h('tbody', null, list.slice(0, LIMIT).map(function (e) {
+          var c = Pd.compare(e, rateFor);
+          return h('tr', null, h('td', { class: 'nowrap' }, h('strong', null, e.code)), h('td', null, e.stop ? h('span', { class: 'tag warn' }, e.note) : e.note), h('td', null, e.assembler), h('td', { class: 'num' }, e.circuits),
+            h('td', null, e.customer), h('td', null, e.maker), h('td', { class: 'nowrap' }, e.cur === 'CNY' ? 'China(RMB)' : e.cur === 'KRW' ? '원화' : e.cur === '?' ? '모름' : '', e.curSrc === '원화 칸으로 추정' ? h('span', { class: 'tag', title: '통화 칸이 비었지만 원화 칸 ÷ 발주단가 = ' + e.implied }, '추정') : null),
+            h('td', { class: 'num' }, e.buy == null ? '' : String(e.buy)), h('td', { class: 'num' }, e.buyKrw == null ? '' : n(e.buyKrw)), h('td', { class: 'num' }, e.implied == null ? '' : String(e.implied)),
+            h('td', { class: 'num' }, c && c.fxKrw != null ? n(c.fxKrw) : c ? h('span', { class: 'tag warn' }, '환율 없음') : ''), h('td', { class: 'num' }, c && c.diff != null ? n(c.diff) : ''));
+        })))));
+    }
+    [q, asm, nt].forEach(function (x) { x.addEventListener('input', draw); });
+    [cu, mk, cr, stp, buy, ms].forEach(function (x) { x.addEventListener('change', draw); });
+    main.appendChild(h('div', { class: 'card' }, h('h2', null, '2. 찾기 · 거르기'),
+      h('div', { class: 'form-grid' },
+        h('label', { class: 'field' }, h('span', null, '천일품번'), q), h('label', { class: 'field' }, h('span', null, '고객사'), cu), h('label', { class: 'field' }, h('span', null, '생산처'), mk),
+        h('label', { class: 'field' }, h('span', null, '조립처(포함)'), asm), h('label', { class: 'field' }, h('span', null, '특이사항(포함)'), nt), h('label', { class: 'field' }, h('span', null, '통화'), cr),
+        h('label', { class: 'field' }, h('span', null, '원화 비교 — 환율 월'), ms, h('small', null, 'China(RMB) 발주단가 × 이 달 월평균(' + (months.length ? '직접입력 > 기준파일 > 자동' : '환율 화면에서 넣어 주세요') + ') 과 파일의 원화 칸을 나란히 봅니다. 수주 줄은 납기월의 전월 환율을 씁니다.')),
+        h('label', { class: 'check field' }, stp, h('span', null, '단종 · 생산금지만')), h('label', { class: 'check field' }, buy, h('span', null, '발주단가 있는 품번만'))),
+      h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn', onclick: function () {
+        writeXlsx({ '완제품정보': Pd.aoa(Pd.filter(p, f), rateFor) }, '완제품정보_거른목록_' + L.todayIso() + '.xlsx');
+      } }, '거른 목록 Excel 내려받기'), h('button', { type: 'button', class: 'btn', onclick: function () { productFilter = { q: '', customer: '', maker: '', assembler: '', note: '', cur: '', stop: false, buy: false, month: f.month }; render(); } }, '거르기 풀기')),
+      holder));
+    draw();
   }
 
   // ── 환율 (기획서 11.15) ─────────────────────────────────
@@ -1415,7 +1556,7 @@
 
   // ── 라우터 ──────────────────────────────────────────
   var ROUTES = [
-    ['intake', '수주 취합', viewIntake], ['monthly', '월별 수주 vs 매입', viewMonthly], ['fx', '환율', viewFx], ['dashboard', '대시보드', viewDashboard], ['data', '자료 가져오기', viewData], ['settings', '설정', viewSettings],
+    ['intake', '수주 취합', viewIntake], ['product', '완제품정보', viewProduct], ['monthly', '월별 수주 vs 매입', viewMonthly], ['fx', '환율', viewFx], ['dashboard', '대시보드', viewDashboard], ['data', '자료 가져오기', viewData], ['settings', '설정', viewSettings],
     ['result', '과부족 현황', viewResult], ['daily', '일자별 예상재고', viewDaily], ['plan', '선적계획', viewPlan],
     ['ai', 'AI 분석', viewAi], ['share', '공유·내보내기', viewShare]
   ];

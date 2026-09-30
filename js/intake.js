@@ -732,6 +732,8 @@
     '납기일', '발주일', '원본파일', '원본 시트', '원본 행', '규칙', '비고'];
   var MARGIN_HEAD = ['판매−매입(단가)', '판매−매입(금액)'];
   // 환율(기획서 11.15) — 맨 끝에 붙임. 원화면 빈칸, 외화면 원래 통화·값과 쓴 환율(또는 「환율 없음」 사유)
+  // 완제품정보(기획서 11.16) — 환율 열 앞에. 매입단가가 완제품정보에서 왔으면 파일의 원화(고정 환율) 값도
+  var PRODUCT_HEAD = ['완제품 고객사', '완제품 특이사항', '조립처', '단종·생산금지', '발주단가(원화) — 완제품정보 파일'];
   var FX_HEAD = ['판매 통화', '판매단가(원래 값)', '매입 통화', '매입단가(원래 값)', '환율 적용 내역'];
   function fxNote(r) {
     return [r.saleFx || r.saleFxMissing, r.buyFx || r.buyFxMissing].filter(Boolean).map(function (f) {
@@ -743,7 +745,7 @@
   function blank(v) { return v == null ? '' : v; }
   /** opts.margin = true 면 매입단가 출처 뒤에 「판매−매입」 두 열 */
   function rowsAoa(rows, opts) {
-    var mg = !!(opts && opts.margin), H = HEAD.slice().concat(FX_HEAD);
+    var mg = !!(opts && opts.margin), H = HEAD.slice().concat(PRODUCT_HEAD, FX_HEAD);
     if (mg) H.splice(H.indexOf('매입단가 출처') + 1, 0, MARGIN_HEAD[0], MARGIN_HEAD[1]);
     return [H].concat(rows.map(function (r) {
       var a = amountOf(r), b = buyAmountOf(r);
@@ -751,6 +753,7 @@
         blank(r.price), blank(a), r.price == null ? (r.saleFxMissing ? '환율 없음' : '판매단가 없음') : (r.priceSrc || '원본'),
         blank(r.buyPrice), blank(b), r.maker || '', r.buyPrice == null ? (r.buyFxMissing ? '환율 없음' : '매입단가 없음') : (r.buySrc || ''),
         r.due, r.orderDate || '', r.source, r.sheet || '', r.row, r.rule || '', [r.note, r.priceNote].filter(Boolean).join(' · '),
+        r.productCustomer || '', r.productNote || '', r.assembler || '', r.productStop ? '예' : '', blank(r.buyKrwFile),
         r.priceCur || '', blank(r.priceOrig), r.buyCur || '', blank(r.buyPriceOrig), fxNote(r)];
       if (mg) line.splice(15, 0, blank(r.margin), blank(r.marginAmount));
       return line;

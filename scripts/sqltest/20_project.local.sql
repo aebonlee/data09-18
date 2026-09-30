@@ -57,12 +57,12 @@ do $t$ begin
   perform public._assert_eq(
     (select count(*)::int from pg_policy p join pg_class c on c.oid = p.polrelid
       join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public'),
-    74, '두 번 적용해도 정책이 74개 그대로다(단가표 price_master 4개 · 환율 fx_rate 4개 포함)');
+    78, '두 번 적용해도 정책이 78개 그대로다(단가표 price_master 4개 · 환율 fx_rate 4개 · 완제품정보 product_info 4개 포함)');
   perform public._assert_eq(
     (select count(*)::int from pg_trigger t join pg_class c on c.oid = t.tgrelid
       join pg_namespace n on n.oid = c.relnamespace
       where n.nspname = 'public' and not t.tgisinternal),
-    18, '두 번 적용해도 updated_at 트리거가 18개 그대로다(fx_rate 포함)');
+    19, '두 번 적용해도 updated_at 트리거가 19개 그대로다(fx_rate · product_info 포함)');
   perform public._assert(public.valid_ship_rule('{"0": null, "1": 2, "2": 2, "3": 2, "4": 4, "5": 3, "6": null}'),
     '원문 입고 규칙(월~수 +2, 목 +4, 금 +3)은 올바른 규칙이다');
   perform public._assert(not public.valid_ship_rule('{"1": 61}'),  '61일 뒤 입고 규칙은 틀린 규칙이다');
@@ -372,6 +372,21 @@ begin
   perform public._assert_raises($q$insert into public.price_master (item, unit_price, currency) values ('FX1', 12.5, 'HKD')$q$, '23514', '매입단가표 통화는 KRW·CNY·USD·JPY·EUR 만');
   insert into public.price_master (item, unit_price, currency) values ('FX1', 12.5, 'CNY');
   delete from public.price_master where item = 'FX1';
+  -- 완제품정보(기획서 11.16): 파일 환율 · 단종 표시는 계산 칸, 출처 「완제품정보」
+  insert into public.product_info (item, note, customer, currency, currency_source, buy_price, buy_price_krw, maker, source_row) values
+    ('SMP-G202', '', '예시고객사A', 'CNY', '원화 칸으로 추정', 12.5, 2875, '생산처B(가상)', 5),
+    ('SMP-P811', '생산금지 예정 — 단종(가상)', '예시고객사C', 'CNY', '통화 칸', 40, 9200, '생산처A(가상)', 6);
+  perform public._assert_eq((select array_agg(implied_rate order by item) from public.product_info), array[230.0000, 230.0000]::numeric[], '파일 환율 = 발주단가(원화) ÷ 발주단가 = 230');
+  perform public._assert_eq((select string_agg(item, ',' order by item) from public.product_info where is_stopped), 'SMP-P811', '특이사항에 단종 · 생산금지 → is_stopped');
+  perform public._assert_raises($q$insert into public.product_info (item) values ('SMP-G202')$q$, '23505', '같은 천일품번은 한 줄(upsert onConflict owner_id,item)');
+  perform public._assert_raises($q$insert into public.product_info (item, buy_price) values ('Z', 0)$q$, '23514', '발주단가 0 은 빈칸(null)으로 넣는다');
+  perform public._assert_raises($q$insert into public.product_info (item, currency) values ('Z', 'RMB')$q$, '23514', '통화는 CNY 로 바꿔 넣는다(RMB 글자 그대로 안 됨)');
+  insert into public.intake_order_line (batch_id, kind, item, qty, due_date, source_file, source_row, buy_price, buy_amount, buy_source, buy_currency, buy_price_orig, buy_fx_rate, fx_month) values
+    (v_x, '엔진', 'SMP-G202', 10, '2026-09-20', 'x.xlsx', '6', 2608.63, 26086.30, '완제품정보', 'CNY', 12.5, 208.69, '2026-08');   -- 12.5 × 208.69 = 2,608.625 → 2,608.63
+  perform public._assert_raises(format(
+    $q$insert into public.intake_order_line (batch_id, kind, item, qty, due_date, source_file, source_row, buy_price, buy_source) values (%s, '엔진', 'X', 1, '2026-10-01', 'x', '94', 100, '추정')$q$, v_x),
+    '23514', '매입단가 출처는 단가표 · 완제품정보 · 직접입력만');
+  delete from public.product_info;
   delete from public.intake_batch where id = v_x;
 end $t$;
 
@@ -398,7 +413,7 @@ begin
   foreach t in array array['app_members', 'source_file', 'order_line', 'stock_line', 'shipment_line',
                            'column_mapping', 'app_settings', 'plan_edit', 'ai_note', 'shipment_plan_log',
                            'intake_setting', 'intake_batch', 'intake_order_line', 'intake_file', 'intake_check',
-                           'part_mapping', 'upload_setting', 'price_master', 'fx_rate']
+                           'part_mapping', 'upload_setting', 'price_master', 'fx_rate', 'product_info']
   loop
     perform public._assert_rows(format('select 1 from public.%I', t), 0, 'B 에게 A 의 ' || t || ' 가 안 보인다');
   end loop;
@@ -474,7 +489,7 @@ begin
   foreach t in array array['app_members', 'source_file', 'order_line', 'stock_line', 'shipment_line',
                            'column_mapping', 'app_settings', 'plan_edit', 'ai_note', 'shipment_plan_log',
                            'intake_setting', 'intake_batch', 'intake_order_line', 'intake_file', 'intake_check',
-                           'part_mapping', 'upload_setting', 'price_master', 'fx_rate']
+                           'part_mapping', 'upload_setting', 'price_master', 'fx_rate', 'product_info']
   loop
     perform public._assert_rows(format('select 1 from public.%I', t), 0, 'anon 에게 ' || t || ' 가 안 보인다');
   end loop;
@@ -529,6 +544,7 @@ delete from public.intake_setting;
 delete from public.part_mapping;
 delete from public.price_master;
 delete from public.fx_rate;
+delete from public.product_info;
 delete from public.upload_setting;
 delete from public.shipment_plan_log;
 delete from public.ai_note;

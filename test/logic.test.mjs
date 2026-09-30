@@ -926,4 +926,75 @@ test('자동 값 파일(data/rates.json): 서울외국환중개 월평균 · CNY
   assert.equal(j.currencies.CNY.months['2026-08'], 208.69);                                   // 2026-09-30 에 받은 값
 });
 
+console.log('완제품정보 · 고객사별 비교 — 기획서 11.16');
+const PD = require('../js/product.js');
+const PDS = PD.parseBook(IS.productBook());
+test('완제품정보 읽기: 3행 · B열 머리, 0 = 빈칸, 같은 품번은 위쪽, 통화 빈칸 + 원화 칸 ÷ 발주단가 = 230 → 위안 추정, 단종 · 생산금지', () => {
+  assert.deepEqual(PD.findHeader(IS.PRODUCT_INFO.Sheet1).hr, 2);
+  assert.deepEqual(PDS.stats, { rows: 10, items: 9, dup: 1, dupDiff: 1, withBuy: 6, withKrw: 6, byCur: { CNY: 5, KRW: 1 }, curFromKrw: 1, curBlankWithBuy: 0, implied: { 1: 1, 230: 5 },
+    withCustomer: 7, withSale: 0, stop: 2, customers: 3, makers: 4, assemblers: 3, badCur: 0 });
+  const g = PDS.map['SMP-G202'];
+  assert.deepEqual([g.cur, g.curSrc, g.buy, g.buyKrw, g.implied, g.customer, g.maker, g.note], ['CNY', '원화 칸으로 추정', 12.5, 2875, 230, '예시고객사A', '생산처B(가상)', '']);
+  assert.deepEqual([PDS.map['SMP-B703'].buy, PDS.map['SMP-B703'].row], [30, 4]);                  // 두 번째 줄(31)이 아님
+  assert.deepEqual([PDS.map['SMP-C101'].cur, PDS.map['SMP-C101'].implied], ['KRW', 1]);             // 원화 칸 = 발주단가 → 원화
+  assert.deepEqual([PDS.map['SMP-E305'].buy, PDS.map['SMP-E305'].assembler, PDS.map['SMP-E305'].circuits], [null, '', '']); // 0 은 빈칸
+  assert.deepEqual(PDS.list.filter((e) => e.stop).map((e) => e.code), ['SMP-P811', 'SMP-A501']);
+  const back = PD.unpack(JSON.parse(JSON.stringify(PD.pack(Object.assign(PDS, { file: 'f', at: 't' })))));
+  assert.deepEqual(back.list.map((e) => [e.code, e.cur, e.buy, e.implied, e.stop]), PDS.list.map((e) => [e.code, e.cur, e.buy, e.implied, e.stop]));   // 저장 · 다시 읽기
+  assert.match(PD.parseBook({ names: ['s'], sheets: { s: [['품명', '수량']] } }).problems[0], /천일 품번/);
+});
+test('완제품정보 거르기 · 파일 원화(고정 230) 와 월평균 원화 나란히: 12.5 위안 × 208.69 = 2,608.625 → 2,608.63, 파일 2,875 → 차이 −266.37', () => {
+  assert.deepEqual(PD.filter(PDS, { customer: '예시고객사B' }).map((e) => e.code), ['SMP-B703', 'SMP-B705']);
+  assert.deepEqual(PD.filter(PDS, { stop: true }).length, 2);
+  assert.deepEqual(PD.filter(PDS, { cur: 'none' }).map((e) => e.code), ['SMP-E305', 'SMP-A501', 'SMP-Z001']);
+  assert.deepEqual(PD.filter(PDS, { note: '외주' }).map((e) => e.code), ['SMP-C101']);
+  assert.deepEqual(PD.filter(PDS, { q: 'b70', buy: true }).map((e) => e.code), ['SMP-B703', 'SMP-B705']);
+  const c = PD.compare(PDS.map['SMP-G202'], () => ({ raw: 208.69, unit: 1, month: '2026-08', src: '자동(서울외국환중개)' }));
+  assert.deepEqual([c.fileKrw, c.fxKrw, c.diff, c.implied], [2875, 2608.63, -266.37, 230]);
+  assert.equal(PD.compare(PDS.map['SMP-C101'], () => null), null);                                // 원화 품번은 비교 없음
+  assert.equal(PD.compare(PDS.map['SMP-G202'], () => null).fxKrw, null);                           // 환율 없으면 비움(짐작 안 함)
+  const A = PD.aoa([PDS.map['SMP-G202']], () => ({ raw: 208.69, unit: 1, month: '2026-08', src: '자동' }));
+  assert.deepEqual(A[1].slice(9, 16), [12.5, 2875, 230, 208.69, '2026-08 · 자동', 2608.63, -266.37]);
+});
+const PDR = FX.resolver({ auto: { rates: FX.fromAuto({ currencies: { CNY: { unit: 1, months: { '2026-08': 208.69 } } } }) } });
+const PDROWS = [
+  { item: 'SMP-G202', company: 'SMP-G202', qty: 10, due: '2026-09-20', customer: '포털 고객사', price: 3000 },   // 완제품정보 12.5 위안 × 208.69 = 2,608.63
+  { item: 'SMP-P811', company: 'SMP-P811', qty: 2, due: '2026-12-01', customer: '', price: null },              // 2026-11 환율 없음, 생산금지
+  { item: 'SMP-C101', company: 'SMP-C101', qty: 1, due: '2026-09-02', customer: '밥캣', price: 12000 },         // 매입단가표 8,000 이 완제품정보 9,000 보다 먼저
+  { item: 'SMP-A501', company: 'SMP-A501', qty: 4, due: '2026-09-03', customer: '', price: null }];             // 완제품정보에 발주단가 없음 → 매입단가 없음
+const PDT = P.parseBook({ names: ['s'], sheets: { s: [['품목코드', '매입단가'], ['SMP-C101', 8000]] } });
+test('매입단가 순서: 매입단가표 > 완제품정보(통화 · 원화 칸 추정 위안) > 직접입력, 고객사 · 특이사항 · 단종 표시, 파일 원화 vs 월평균 금액', () => {
+  const R = P.apply(PDROWS, PDT, { 'SMP-A501': 100 }, { fx: { resolver: PDR, mode: 'prev' }, product: PDS });
+  const [g, p8, c1, a5] = R.rows;
+  assert.deepEqual([g.buyPrice, g.buySrc, g.maker, g.buyCur, g.buyKrwFile, g.buyAmount, g.productCustomer], [2608.63, '완제품정보', '생산처B(가상)', 'CNY', 2875, 26086.3, '예시고객사A']);
+  assert.deepEqual([p8.buyPrice, p8.buyFxMissing.reason, p8.productStop, p8.productNote], [null, 'CNY 2026-11 환율 없음', true, '생산금지 예정 — 단종(가상)']);
+  assert.deepEqual([c1.buyPrice, c1.buySrc, c1.productNote, c1.productStop], [8000, '단가표', '국내 외주 전환(가상)', false]);
+  assert.deepEqual([a5.buyPrice, a5.buySrc, a5.productStop], [100, '직접입력', true]);             // 완제품정보에 발주단가가 없으면 직접입력
+  assert.deepEqual([R.stats.buyBySrc['완제품정보'], R.stats.productRows, R.stats.productStopRows, R.stats.productStopItems], [1, 4, 2, 2]);
+  assert.deepEqual([R.stats.fileKrwRows, R.stats.fileKrwAmount, R.stats.fxKrwAmount], [1, 28750, 26086.3]);   // 10 × 2,875 vs 10 × 2,608.63
+  const F = P.apply(PDROWS, PDT, {}, { fx: { resolver: PDR }, product: PDS, productFallback: true });   // 월평균이 없으면 파일 원화 칸(230)
+  assert.deepEqual([F.rows[1].buyPrice, F.rows[1].buyFx.src, F.stats.buyFileFallback, F.fxMissing.length], [9200, '완제품정보 원화 칸(고정 환율)', 1, 0]);
+  const none = P.apply(PDROWS, null, {}, { fx: { resolver: PDR } });
+  assert.equal(none.rows[0].buyPrice, null);                                                       // 완제품정보가 없으면 그대로
+});
+test('고객사별 비교: 수주 고객사(없으면 완제품정보) · 완제품정보 우선 선택, 비중, 월 × 고객사, Excel 덩어리', () => {
+  const R = P.apply(PDROWS, PDT, {}, { fx: { resolver: PDR }, product: PDS });
+  const S = MO.summarize(R.rows);
+  // 포털 고객사: 수주 10 × 3,000 = 30,000 · 발주 26,086.30 → 87.0% / 밥캣: 12,000 · 8,000 → 66.7% / 예시고객사C(수주 고객사 없음 → 완제품정보): 수주 0 · 발주 0(환율 없음 1행)
+  assert.deepEqual(S.total.customers.map((c) => [c.customer, c.sale, c.buy, c.share, c.buyFx0, c.buyNone, MO.fromText(c)]),
+    [['포털 고객사', 30000, 26086.3, 87, 0, 0, '수주 1'], ['밥캣', 12000, 8000, 66.7, 0, 0, '수주 1'], ['예시고객사C', 0, 0, null, 1, 1, '완제품정보 2']]);
+  const S2 = MO.summarize(R.rows, { custBy: 'product' });
+  // 완제품정보 우선: G202 · C101 → 예시고객사A(수주 30,000 + 12,000 = 42,000 · 발주 26,086.30 + 8,000 = 34,086.30 → 81.2%), P811 · A501 → 예시고객사C
+  assert.deepEqual(S2.total.customers.map((c) => [c.customer, c.rows, c.sale, c.buy, c.share, MO.fromText(c)]), [['예시고객사A', 2, 42000, 34086.3, 81.2, '완제품정보 2'], ['예시고객사C', 2, 0, 0, null, '완제품정보 2']]);
+  assert.equal(MO.customerOf({ customer: '', productCustomer: '' }).name, '(고객사 없음)');
+  const sep = S.months.find((m) => m.month === '2026-09');
+  assert.deepEqual(sep.customers.map((c) => c.customer), ['포털 고객사', '밥캣', '예시고객사C']);
+  const A = MO.aoa(S), ci = A.findIndex((r) => /^고객사별 총금액 비교/.test(r[0] || ''));
+  assert.ok(ci > 0 && ci < A.findIndex((r) => /^월별 상세/.test(r[0] || '')));
+  assert.deepEqual(A[ci + 1].slice(0, 4), ['고객사', '수주금액', '발주금액(매입)', '비중(발주÷수주, %)']);
+  assert.deepEqual(A[ci + 2].slice(0, 4), ['포털 고객사', 30000, 26086.3, 87]);
+  const mi = A.findIndex((r) => r[0] === '납기월 × 고객사');
+  assert.deepEqual(A[mi + 2].slice(0, 5), ['2026-09', '포털 고객사', 30000, 26086.3, 87]);
+});
+
 console.log(`\n${passed}개 통과`);

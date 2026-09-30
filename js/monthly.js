@@ -17,6 +17,9 @@
    2026-09-30 환율(기획서 11.15): 외화 단가는 price.js 에서 원화로 바꾼 값(price · buyPrice)으로 더합니다.
      환율이 없어 원화로 바꾸지 못한 줄은 금액에서 빠지고 「환율 없음」 행 수(saleFx0 · buyFx0)로 따로 셉니다(단가 없음과 섞지 않음).
      달마다 쓴 환율(통화 · 환율 월 · 값 · 출처)을 fx 목록으로 모아 화면·Excel 에 함께 보입니다.
+   2026-09-30 고객사별 비교(기획서 11.16, 요청 「최종 매입 매출 비교시 고객사별 비교가능한지」):
+     고객사마다 수주금액 · 발주(매입)금액 · 비중, 월 × 고객사. 고객사 = 수주 파일의 고객사(없으면 완제품정보의 고객사) — 설정 custBy 'order'(기본).
+     custBy 'product' 는 완제품정보의 고객사를 먼저 씁니다(포털 파일은 고객사 이름이 없어 「포털 고객사」 한 칸으로 모이기 때문).
    브라우저(window.SPMonthly)와 node(require) 양쪽에서 씁니다. */
 (function (root, factory) {
   var api = factory();
@@ -37,7 +40,15 @@
   function options(o) {
     o = o || {};
     var top = parseInt(o.topN, 10);
-    return { by: o.by === 'order' ? 'order' : 'due', topN: top > 0 ? Math.min(top, 500) : DEFAULT_TOP };
+    return { by: o.by === 'order' ? 'order' : 'due', topN: top > 0 ? Math.min(top, 500) : DEFAULT_TOP, custBy: o.custBy === 'product' ? 'product' : 'order' };
+  }
+  var CUST_BY = { order: '수주 파일의 고객사(없으면 완제품정보)', product: '완제품정보의 고객사(없으면 수주 파일)' };
+  var NO_CUST = '(고객사 없음)';
+  /** 고객사별 비교에 쓰는 고객사 이름과 어디서 왔는지 */
+  function customerOf(r, custBy) {
+    var a = str(r.customer), b = str(r.productCustomer);
+    if (custBy === 'product') return b ? { name: b, from: '완제품정보' } : a ? { name: a, from: '수주' } : { name: NO_CUST, from: '' };
+    return a ? { name: a, from: '수주' } : b ? { name: b, from: '완제품정보' } : { name: NO_CUST, from: '' };
   }
   /** 행의 월 열쇠 'YYYY-MM' — 날짜가 없거나 이상하면 '' */
   function monthOf(r, by) {
@@ -84,13 +95,18 @@
   function summarize(rows, opts) {
     var o = options(opts);
     var months = {}, total = newAgg();
-    total.g = {}; total.i = {};
+    total.g = {}; total.i = {}; total.cu = {};
     (rows || []).forEach(function (r) {
       var m = monthOf(r, o.by);
       var M = months[m];
-      if (!M) { M = months[m] = newAgg(); M.month = m; M.label = monthLabel(m, o.by); M.g = {}; M.i = {}; }
+      if (!M) { M = months[m] = newAgg(); M.month = m; M.label = monthLabel(m, o.by); M.g = {}; M.i = {}; M.cu = {}; }
       add(M, r); add(total, r);
+      var co = customerOf(r, o.custBy);
       [M, total].forEach(function (T) {
+        var c = T.cu[co.name];
+        if (!c) { c = T.cu[co.name] = newAgg(); c.key = co.name; c.customer = co.name; c.from = {}; }
+        if (co.from) c.from[co.from] = (c.from[co.from] || 0) + 1;
+        add(c, r);
         var gk = groupKey(r), g = T.g[gk];
         if (!g) { g = T.g[gk] = newAgg(); g.key = gk; g.customer = str(r.customer); g.group = str(r.group); }
         add(g, r);
@@ -113,13 +129,14 @@
         });
         top.push(finish(e));
       }
-      delete T.g; delete T.i;
-      T.groups = groups; T.items = top;
+      var custs = Object.keys(T.cu).map(function (k) { return finish(T.cu[k]); }).sort(function (a, b) { return a.key === NO_CUST ? 1 : b.key === NO_CUST ? -1 : byAmount(a, b); });
+      delete T.g; delete T.i; delete T.cu;
+      T.groups = groups; T.items = top; T.customers = custs;
       return finish(T);
     }
     var list = Object.keys(months).sort(function (a, b) { return a === '' ? 1 : b === '' ? -1 : a.localeCompare(b); }).map(function (k) { return close(months[k]); });
     var T = close(total);
-    return { by: o.by, byLabel: BY[o.by], topN: o.topN, months: list, total: T, hasFx: !!(T.fx.length || T.saleFx0 || T.buyFx0) };
+    return { by: o.by, byLabel: BY[o.by], topN: o.topN, custBy: o.custBy, custByLabel: CUST_BY[o.custBy], months: list, total: T, hasFx: !!(T.fx.length || T.saleFx0 || T.buyFx0) };
   }
 
   var SHARE_NOTE = '비중 = 발주금액(매입) 합계 ÷ 수주금액 합계 × 100. 단가가 없는 줄은 그쪽 합계에서 빠지므로 「단가 없음」 행 수와 함께 읽어 주세요.';
@@ -134,6 +151,7 @@
   }
   var FX_HEAD = ['환율 없음(행)', '적용 환율'];
   function fxCells(a) { return [a.saleFx0 + a.buyFx0, fxText(a)]; }
+  function fromText(c) { return Object.keys(c.from || {}).map(function (k) { return k + ' ' + c.from[k]; }).join(' · '); }
   function fmt(v) { return Math.round(v).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
   /** 한 달 한 줄 문장 — 「2026-10 수주금액 2,000원 · 발주금액 980원 · 수주금액 대비 발주금액 49.0%」 (+ 단가 없음 행) */
   function sentence(a) {
@@ -158,6 +176,14 @@
     out.push([sum.byLabel].concat(TOTAL_HEAD, fx ? FX_HEAD : []));
     sum.months.forEach(function (m) { out.push([m.label].concat(totalCells(m), fx ? fxCells(m) : [])); });
     out.push(['합계'].concat(totalCells(sum.total), fx ? fxCells(sum.total) : []));
+    out.push([]);
+    out.push(['고객사별 총금액 비교 — 고객사: ' + (sum.custByLabel || CUST_BY.order)]);
+    out.push(['고객사'].concat(TOTAL_HEAD, fx ? FX_HEAD : [], ['고객사 출처(행 수)']));
+    (sum.total.customers || []).forEach(function (c) { out.push([c.customer].concat(totalCells(c), fx ? fxCells(c) : [], [fromText(c)])); });
+    out.push([]);
+    out.push([sum.byLabel + ' × 고객사']);
+    out.push([sum.byLabel, '고객사'].concat(TOTAL_HEAD, fx ? FX_HEAD : []));
+    sum.months.forEach(function (m) { (m.customers || []).forEach(function (c) { out.push([m.label, c.customer].concat(totalCells(c), fx ? fxCells(c) : [])); }); });
     out.push([]);
     out.push(['월별 상세 — 차액·차익률(둘 다 있는 줄)은 보조 정보']);
     out.push([NOTE]);
@@ -185,5 +211,5 @@
     return out;
   }
 
-  return { BY: BY, BY_FIXED: BY_FIXED, NO_DATE: NO_DATE, DEFAULT_TOP: DEFAULT_TOP, NOTE: NOTE, SHARE_NOTE: SHARE_NOTE, sentence: sentence, fxText: fxText, SHEET: '월별 수주 vs 매입', options: options, monthOf: monthOf, summarize: summarize, aoa: aoa };
+  return { BY: BY, BY_FIXED: BY_FIXED, NO_DATE: NO_DATE, DEFAULT_TOP: DEFAULT_TOP, NOTE: NOTE, SHARE_NOTE: SHARE_NOTE, sentence: sentence, fxText: fxText, fromText: fromText, customerOf: customerOf, CUST_BY: CUST_BY, NO_CUST: NO_CUST, SHEET: '월별 수주 vs 매입', options: options, monthOf: monthOf, summarize: summarize, aoa: aoa };
 });

@@ -4,6 +4,7 @@
   var KEY = 'data09-18.state';
   var MAP_KEY = 'data09-18.partMapping'; // 고객사 품번 ↔ 천일품번 매핑표(실제 회사 자료 — 이 브라우저에만, 리포에는 없음)
   var PRICE_KEY = 'data09-18.buyPriceTable'; // 매입단가표(당사 품목코드 → 매입단가 · 생산처, 실제 회사 자료 — 이 브라우저에만)
+  var PRODUCT_KEY = 'data09-18.productInfo'; // 완제품정보(천일품번 마스터, 실제 회사 자료 — 이 브라우저에만, 기획서 11.16)
   var FX_KEY = 'data09-18.fxFile'; // 불러온 환율 기준 파일에서 읽은 값 {rates, stats, file, at} (기획서 11.15)
   var OLD_PRICE_KEY = 'data09-18.priceTable'; // 2026-09-30 오전판 「단가표」(고객 발주 단가를 채우던 것) — 뜻이 바뀌어 읽지 않고 지웁니다
   var memory = {};
@@ -35,6 +36,7 @@
       // 환율(기획서 11.15): mode prev 납기월의 전월 평균(기본) | same 당월 평균 · defaultCur 통화가 적히지 않은 매입단가의 통화
       //   manual {'CNY|2026-09': 환율} 직접 입력(가장 먼저 씀) · useAuto 자동 값(data/rates.js) 사용
       fx: { mode: 'prev', defaultCur: 'KRW', manual: {}, useAuto: true },
+      productOpts: { fallbackKrw: false }, // 완제품정보: 월평균 환율이 없을 때 파일의 「발주단가(원화)」(고정 환율 값)를 쓸지 — 기본 쓰지 않음(확인 부탁)
       manualBuyCur: {}, // 직접 적은 매입단가의 통화 {품목코드 열쇠: 'CNY'…} — 없으면 fx.defaultCur
       _sample: false
     };
@@ -68,6 +70,7 @@
         useAuto: p.fx.useAuto !== false
       };
       if (p.manualBuyCur && typeof p.manualBuyCur === 'object') st.manualBuyCur = p.manualBuyCur;
+      if (p.productOpts) st.productOpts = { fallbackKrw: !!p.productOpts.fallbackKrw };
     } catch (e) { /* 깨진 값은 무시하고 빈 상태 */ }
     return st;
   }
@@ -82,6 +85,10 @@
     loadPriceTable: function () { if (get(OLD_PRICE_KEY) != null) del(OLD_PRICE_KEY); var raw = get(PRICE_KEY); if (!raw) return null; try { var t = JSON.parse(raw); return t && t.map ? t : null; } catch (e) { return null; } },
     savePriceTable: function (t) { set(PRICE_KEY, JSON.stringify(t)); },
     clearPriceTable: function () { del(PRICE_KEY); },
+    loadProduct: function () { var raw = get(PRODUCT_KEY); if (!raw) return null; try { return root.SPProduct ? root.SPProduct.unpack(JSON.parse(raw)) : null; } catch (e) { return null; } },
+    /** 저장하고 성공했는지 돌려줌(15,000줄이 넘으면 브라우저 저장 한도에 걸릴 수 있음 — 그러면 이 창에서만 씀) */
+    saveProduct: function (p) { var before = ok; ok = true; set(PRODUCT_KEY, JSON.stringify(root.SPProduct.pack(p))); var r = ok; ok = before && ok; return r; },
+    clearProduct: function () { del(PRODUCT_KEY); },
     loadFxFile: function () { var raw = get(FX_KEY); if (!raw) return null; try { var t = JSON.parse(raw); return t && t.rates ? t : null; } catch (e) { return null; } },
     saveFxFile: function (t) { set(FX_KEY, JSON.stringify(t)); },
     clearFxFile: function () { del(FX_KEY); },

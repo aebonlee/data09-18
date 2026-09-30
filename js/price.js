@@ -36,8 +36,8 @@
   // 판매단가 출처(intake.js) · 매입단가 출처(이 파일)
   var SALE_SRC = { source: '원본', borrowed: '원본(같은 품번)' };
   var SALE_ORDER = [SALE_SRC.source, SALE_SRC.borrowed];
-  var BUY_SRC = { table: '단가표', manual: '직접입력' };
-  var BUY_ORDER = [BUY_SRC.table, BUY_SRC.manual];
+  var BUY_SRC = { table: '단가표', product: '완제품정보', manual: '직접입력' };
+  var BUY_ORDER = [BUY_SRC.table, BUY_SRC.product, BUY_SRC.manual];   // 2026-09-30 완제품정보(기획서 11.16): 매입단가표 > 완제품정보 발주단가 > 직접입력
 
   // 매입단가표 열 이름 후보. 앞쪽이 우선 — 「매입단가」와 「단가」가 함께 있으면 매입단가를 읽습니다.
   // 「판매단가」는 고객 발주 단가라 매입단가로 읽지 않습니다(표에 같이 있어도 건너뜀)
@@ -138,7 +138,10 @@
   /* opts(기획서 11.15 환율, 없으면 모두 원화로 봄):
        defaultCur — 통화가 적히지 않은 매입단가의 통화(매입단가표 · 직접입력 공통, 기본 'KRW')
        manualCur  — { buyKey: 통화 } 직접 적은 매입단가의 통화(없으면 defaultCur)
-       fx         — { resolver: SPFx.resolver(...), mode: 'prev'|'same' } — 외화를 원화로 바꿀 때 씀 */
+       fx         — { resolver: SPFx.resolver(...), mode: 'prev'|'same' } — 외화를 원화로 바꿀 때 씀
+       product    — SPProduct.parseBook 결과(완제품정보, 기획서 11.16). 매입단가표에 없는 품번의 발주단가 · 통화 · 생산처,
+                    모든 줄에 고객사(productCustomer) · 특이사항(productNote) · 단종/생산금지(productStop) · 조립처
+       productFallback — true 면 월평균 환율이 없을 때 완제품정보의 「발주단가(원화)」(파일의 고정 환율 값)를 씀(기본 false — 확인 부탁) */
   function apply(rows, table, manual, opts) {
     manual = manual || {}; opts = opts || {};
     var defCur = opts.defaultCur && opts.defaultCur !== 'KRW' ? opts.defaultCur : '';
@@ -156,13 +159,25 @@
       both: 0, marginAmount: 0, negative: 0, negativeItems: 0,
       tableLoaded: has(table), manualCount: 0, manualShadowed: 0, bySource: {},
       buyMultiRows: 0, buyMultiItems: 0,
-      buyFx: 0, buyFxNone: 0, saleFx: 0, saleFxNone: 0   // 외화 단가를 원화로 바꾼 행 · 환율이 없어 금액에서 뺀 행
+      buyFx: 0, buyFxNone: 0, saleFx: 0, saleFxNone: 0,  // 외화 단가를 원화로 바꾼 행 · 환율이 없어 금액에서 뺀 행
+      productLoaded: false, productRows: 0, productStopRows: 0, productStopItems: 0, buyFileFallback: 0,
+      fileKrwRows: 0, fileKrwAmount: 0, fxKrwAmount: 0   // 완제품정보 발주단가로 원화를 낸 줄: 파일 원화(고정 환율) 금액 vs 월평균 금액
     };
+    var prod = opts.product && opts.product.map && Object.keys(opts.product.map).length ? opts.product : null;
+    stats.productLoaded = !!prod;
+    var stopItems = {};
     BUY_ORDER.forEach(function (s) { stats.buyBySrc[s] = 0; });
     SALE_ORDER.forEach(function (s) { stats.saleBySrc[s] = 0; });
     var miss = {}, neg = {}, multi = {};
     var out = rows.map(function (r) {
       var x = Object.assign({}, r), k = buyKey(r);
+      // 완제품정보(기획서 11.16): 고객사 · 특이사항 · 조립처 · 단종/생산금지
+      var pe = prod ? prod.map[k] || null : null;
+      if (pe) {
+        stats.productRows++;
+        x.productCustomer = pe.customer || ''; x.productNote = pe.note || ''; x.assembler = pe.assembler || ''; x.productStop = !!pe.stop;
+        if (pe.stop) { stats.productStopRows++; stopItems[k] = 1; }
+      }
       // 판매단가(고객 발주, 참고) — 통화 칸이 원화가 아니면 원화로 바꿈(원래 값은 priceOrig · priceCur)
       var sc = Fx && x.price != null ? Fx.normCurrency(x.currency) : '';
       if (sc !== '' && sc !== 'KRW') {
@@ -182,14 +197,25 @@
         x.buyPrice = t.price; x.buySrc = BUY_SRC.table; x.maker = t.maker || ''; bc = t.cur || defCur;
         if (table.conflicts && table.conflicts[k]) { x.buyMulti = true; stats.buyMultiRows++; multi[k] = 1; }   // 단가가 여럿 → 위쪽 값(확정)
       }
+      else if (pe && pe.buy && pe.cur !== '?') {   // 완제품정보 발주단가 — 통화 칸(또는 원화 칸으로 추정한 위안), 없으면 기본 통화
+        x.buyPrice = pe.buy; x.buySrc = BUY_SRC.product; x.maker = pe.maker || ''; bc = pe.cur || defCur;
+        if (pe.buyKrw && bc && bc !== 'KRW') x.buyKrwFile = pe.buyKrw;
+      }
       else if (m != null && m > 0) { x.buyPrice = m; x.buySrc = BUY_SRC.manual; x.maker = ''; bc = manCur[k] || defCur; }
       else { x.buyPrice = null; x.buySrc = ''; x.maker = ''; }
       if (bc === 'KRW') bc = '';
       if (x.buyPrice != null && bc) {   // 외화 매입단가 → 원화
         var bv = conv(x.buyPrice, bc, r);
         x.buyPriceOrig = x.buyPrice; x.buyCur = bc;
-        if (bv.missing) { x.buyPrice = null; x.buyFxMissing = bv; }
+        if (bv.missing && opts.productFallback && x.buyKrwFile) {   // 월평균이 없으면 완제품정보의 원화 칸(고정 환율)
+          x.buyPrice = x.buyKrwFile; stats.buyFileFallback++;
+          x.buyFx = { cur: bc, orig: x.buyPriceOrig, raw: pe.implied, unit: 1, rate: pe.implied, month: '', src: '완제품정보 원화 칸(고정 환율)', krw: x.buyKrwFile, fallback: true };
+          fxMiss[bv.cur + '|' + bv.month + '|' + bv.reason].rows--;
+          if (!fxMiss[bv.cur + '|' + bv.month + '|' + bv.reason].rows) delete fxMiss[bv.cur + '|' + bv.month + '|' + bv.reason];
+        }
+        else if (bv.missing) { x.buyPrice = null; x.buyFxMissing = bv; }
         else { x.buyPrice = bv.krw; x.buyFx = bv; stats.buyFx++; }
+        if (x.buyKrwFile && x.buyFx && !x.buyFx.fallback) { stats.fileKrwRows++; stats.fileKrwAmount += x.qty * x.buyKrwFile; stats.fxKrwAmount += x.qty * x.buyPrice; }
       }
       x.buyAmount = amount(x.qty, x.buyPrice);
       if (x.buyFxMissing) { stats.buyFxNone++; }
@@ -211,7 +237,8 @@
       } else { x.margin = null; x.marginAmount = null; }
       return x;
     });
-    ['buyAmount', 'saleAmount', 'marginAmount'].forEach(function (f) { stats[f] = round2(stats[f]); });
+    ['buyAmount', 'saleAmount', 'marginAmount', 'fileKrwAmount', 'fxKrwAmount'].forEach(function (f) { stats[f] = round2(stats[f]); });
+    stats.productStopItems = Object.keys(stopItems).length;
     stats.negativeItems = Object.keys(neg).length;
     stats.buyMultiItems = Object.keys(multi).length;
     Object.keys(manual).forEach(function (k) {
