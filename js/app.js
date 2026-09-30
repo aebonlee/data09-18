@@ -180,10 +180,47 @@
   }
 
   // ── 대시보드 (기획안 11장) ─────────────────────────────
+  // 첫 화면 브랜드 블록 (2026-09-30, 기획서 11.18) — 로고 · 도구 이름 · 한 줄 설명 · 바로가기 · 작업 순서 6단계.
+  // 단계 카드의 숫자는 모두 지금 불러온 자료에서 셉니다(없으면 「아직 없음」) — 고정 숫자를 쓰지 않습니다.
+  function heroBlock(c) {
+    var r = st.intake, has = !!c, mi = null, share = null;
+    if (r && r.rows && r.rows.length && Mo && Pr) {
+      try { mi = mappedIntake(); share = Mo.summarize(mi.rows, Mo.options(st.monthlyOpts)).total.share; } catch (e) { mi = null; }
+    }
+    var ps = product && product.stats;
+    var steps = [
+      ['#/intake', '파일 넣기', r ? '파일 ' + n((r.files || []).length) + '개' + (r.sample ? ' (예시)' : '') : '포털 · 발주서 · 재고 파일'],
+      ['#/intake', '수주 취합', r ? '통합 수주 ' + n(r.rows.length) + '행 · ★확인 ' + n((r.checks || []).length) + '건' : '아직 없음'],
+      ['#/product', '완제품정보', ps ? '천일품번 ' + n(ps.items) + '개' : '아직 없음'],
+      ['#/result', '예상재고 · 과부족', has ? '부족 품번 ' + n(c.k.shortItems) + '개 · 긴급 ' + n(c.k.urgentItems.length) + '개' : '아직 없음'],
+      ['#/plan', '선적계획', has ? '제안 ' + n(c.plans.length) + '건 · 금주 ' + n(c.k.weekShipPlanned + c.k.weekShipConfirmed) + '개' : '아직 없음'],
+      ['#/monthly', '월별 수주 vs 매입', share != null ? '비중(발주 ÷ 수주) ' + share.toFixed(1) + '%' : (mi ? '단가 확인 필요' : '아직 없음')]
+    ];
+    return h('section', { class: 'hero', 'aria-labelledby': 'dashTitle' },
+      h('div', { class: 'hero-text' },
+        h('div', { class: 'hero-brand' },
+          h('img', { class: 'hero-logo', src: 'img/logo.png', width: '155', height: '128', alt: '천일테크윈 로고' }),
+          h('div', null, h('p', { class: 'hero-eyebrow' }, '선적계획 자동화'), h('h1', { id: 'dashTitle' }, '대시보드'))),
+        h('p', { class: 'hero-lead' }, '고객사 수주 파일을 한 표로 모아 예상재고 · 과부족을 계산하고, 중국 선적계획과 월별 수주 vs 매입 금액까지 이어서 봅니다.'),
+        h('p', { class: 'hero-principle' }, has ? '기준일 ' + L.fmtDate(c.res.base) + ' · 자료와 계산 결과는 이 브라우저에만 저장됩니다.' : '자료와 계산 결과는 이 브라우저에만 저장되며 외부로 보내지 않습니다.'),
+        h('div', { class: 'actions' },
+          h('a', { class: 'btn btn-primary', href: '#/intake' }, '수주 취합 시작'),
+          h('a', { class: 'btn', href: '#/result' }, '과부족 현황'),
+          h('a', { class: 'btn', href: '#/plan' }, '선적계획'),
+          h('a', { class: 'btn', href: '#/share' }, '공유 · 내보내기'))),
+      h('nav', { class: 'hero-flow', 'aria-labelledby': 'dashFlow' },
+        h('p', { class: 'hero-flow-title', id: 'dashFlow' }, '작업 순서'),
+        h('ol', null, steps.map(function (s, i) {
+          return h('li', null, h('a', { class: 'step', href: s[0] },
+            h('span', { class: 'n', 'aria-hidden': 'true' }, String(i + 1)),
+            h('span', { class: 'step-body' }, h('strong', null, s[1]), h('small', null, s[2]))));
+        }))));
+  }
   function viewDashboard() {
-    main.appendChild(h('div', { class: 'page-head' }, h('h1', null, '대시보드'), hasData() ? h('span', { class: 'note' }, '기준일 ' + L.fmtDate(calc().res.base)) : null));
-    if (!hasData()) { needData(); return; }
-    var c = calc(), k = c.k;
+    var c = hasData() ? calc() : null;
+    main.appendChild(heroBlock(c));
+    if (!c) { needData(); return; }
+    var k = c.k;
     append(main, warningsBox(c));
     function kpi(label, value, sub, alert, href) {
       var box = h(href ? 'a' : 'div', { class: 'kpi' + (alert ? ' alert-kpi' : ''), href: href || null, style: href ? 'text-decoration:none;color:inherit' : null },
@@ -1528,7 +1565,7 @@
     ['fx', '환율(참고)', viewFx]   // 2026-09-30 다섯 번째 답변(기획서 11.17): 매입단가 계산에는 쓰지 않음 — 맨 끝 참고 메뉴로
   ];
   function render() {
-    var parts = (location.hash.replace(/^#\/?/, '') || (hasData() ? 'dashboard' : 'data')).split('/');
+    var parts = (location.hash.replace(/^#\/?/, '') || 'dashboard').split('/');
     var route = parts[0], arg = parts[1] ? decodeURIComponent(parts[1]) : '';
     var hit = ROUTES.filter(function (r) { return r[0] === route; })[0] || ROUTES[1];
     var nav = document.getElementById('nav');
