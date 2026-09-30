@@ -667,10 +667,12 @@
   }
 
   // ── 6. 내보내기·넘기기 ─────────────────────────────────
-  var HEAD = ['고객사', '공장', '구분', '품목코드', '품명', '수량', '납기일', '발주일', '원본파일', '원본 시트', '원본 행', '규칙', '비고'];
+  // 품목코드 = 고객사 품번(파일 그대로), 천일품번 = 매핑표로 바꾼 당사 품번(기획서 11.10). 매핑 전 행은 천일품번 칸이 품목코드와 같습니다
+  var MAP_LABEL = { mapped: '매핑됨', conflict: '매핑 충돌', unmapped: '매핑 없음', nomap: '매핑표 없음', none: '매핑 대상 아님' };
+  var HEAD = ['고객사', '공장', '구분', '품목코드', '천일품번', '매핑', '품명', '수량', '납기일', '발주일', '원본파일', '원본 시트', '원본 행', '규칙', '비고'];
   function rowsAoa(rows) {
     return [HEAD].concat(rows.map(function (r) {
-      return [r.customer, r.plant, r.group, r.item, r.name, r.qty, r.due, r.orderDate || '', r.source, r.sheet || '', r.row, r.rule || '', r.note || ''];
+      return [r.customer, r.plant, r.group, r.item, r.company || r.item, MAP_LABEL[r.mapStatus] || '', r.name, r.qty, r.due, r.orderDate || '', r.source, r.sheet || '', r.row, r.rule || '', r.note || ''];
     }));
   }
   function excludedText(rep) { return Object.keys(rep.excluded).map(function (k) { return k + ' ' + rep.excluded[k]; }).join(' / '); }
@@ -687,10 +689,11 @@
     if (res.shipments) s['선적예정'] = L.dataSheets({ shipments: res.shipments })['선적예정'];
     return s;
   }
-  /** 통합 표 → 이 도구의 입력 ①「수주현황」 표준 열(자동 매핑됩니다). 공장·구분·원본은 뒤에 덧붙입니다 */
+  /** 통합 표 → 이 도구의 입력 ①「수주현황」 표준 열(자동 매핑됩니다). 품번 = 천일품번(재고·선적계획과 맞추는 값).
+      고객사 품번·매핑·공장·구분·원본은 뒤에 덧붙입니다 */
   function ordersAoa(rows) {
-    return [['품번', '품명', '고객사', '수주일', '납기일', '수주수량', '공장', '구분', '원본파일', '원본 행']].concat(rows.map(function (r) {
-      return [r.item, r.name, r.customer, r.orderDate || '', r.due, r.qty, r.plant, r.group, r.source, r.row];
+    return [['품번', '품명', '고객사', '수주일', '납기일', '수주수량', '공장', '구분', '고객사 품목코드', '매핑', '원본파일', '원본 행']].concat(rows.map(function (r) {
+      return [r.company || r.item, r.name, r.customer, r.orderDate || '', r.due, r.qty, r.plant, r.group, r.item, MAP_LABEL[r.mapStatus] || '', r.source, r.row];
     }));
   }
   function summary(res) {

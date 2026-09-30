@@ -14,7 +14,7 @@
 --  본인 프로젝트에 올리는 것을 전제로 하므로 테이블 이름에 접두사를 붙이지 않았습니다.
 --  회사 공용 URL·키는 어디에도 들어 있지 않습니다.
 --
---  테이블 (15개)
+--  테이블 (17개)
 --    app_members        — 팀 구성원과 역할 (admin=생산관리 담당자 / member=구매·물류 담당자, 읽기 전용)
 --    source_file        — 올린 엑셀 한 벌 (dataset: orders 수주 / stock 재고 / shipments 선적예정)
 --    order_line         — 수주현황 한 행 (품번·품명·고객사·수주일·납기일·수주수량)
@@ -31,6 +31,9 @@
 --    intake_order_line  — 통합 수주 표 한 행 (고객사·공장·구분·품목코드·수량·납기일·발주일·원본파일/행)
 --    intake_file        — 파일별 집계 (판별 종류·읽은 행·수집·규칙으로 뺀 행과 사유)
 --    intake_check       — 「★확인 필요」 한 줄 (판별·매핑하지 못한 파일·칸)
+--    ── 품번 매핑·ERP 업로드 (기획서 11.10, 2026-09-30 매핑표·업로드 양식 수령) ──
+--    part_mapping       — 고객사 품번 → 천일품번 (묶음: doosan 건기·엔진 / bobcat 밥캣). 충돌은 두 행으로 남긴다
+--    upload_setting     — ERP 업로드 양식 설정 (양식 머리행·일자·순번·납품처표·고정값) — 사용자당 한 행
 --
 --  접근 규칙
 --    · 자료는 올린 사람(owner_id)만 쓰고 고친다.
@@ -257,12 +260,23 @@ create table if not exists public.intake_order_line (
   source_row    text not null check (length(btrim(source_row)) > 0),   -- 엑셀 행 번호 또는 PDF 'p1'
   rule          text not null default '',
   note          text not null default '',
+  company_item  text not null default '',                          -- 천일품번(매핑표로 바꾼 당사 품번, 기획서 11.10). 비면 item 과 같음
+  map_status    text not null default '' check (map_status in ('', 'mapped', 'conflict', 'unmapped', 'nomap', 'none')),
   created_at    timestamptz not null default now(),
   updated_at    timestamptz not null default now(),
   -- ⚠ upsert 시 onConflict: 'batch_id,source_file,source_sheet,source_row,due_date'
   constraint intake_order_line_src_key unique (batch_id, source_file, source_sheet, source_row, due_date)
 );
 create index if not exists intake_order_line_item_idx on public.intake_order_line (batch_id, item, due_date);
+-- 2026-09-30 추가 칸 — 이미 만들어진 표에도(재실행 안전)
+alter table public.intake_order_line add column if not exists company_item text not null default '';
+alter table public.intake_order_line add column if not exists map_status text not null default '';
+do $c$ begin
+  if not exists (select 1 from pg_constraint where conname = 'intake_order_line_map_status_check') then
+    alter table public.intake_order_line add constraint intake_order_line_map_status_check
+      check (map_status in ('', 'mapped', 'conflict', 'unmapped', 'nomap', 'none'));
+  end if;
+end $c$;
 
 -- 파일별 집계
 create table if not exists public.intake_file (
@@ -299,6 +313,42 @@ create table if not exists public.intake_check (
 );
 create index if not exists intake_check_batch_idx on public.intake_check (batch_id);
 
+-- ── 품번 매핑·ERP 업로드 (기획서 11.10) ────────────────────────────────────
+-- 고객사 품번 → 천일품번. 매핑표 파일의 한 줄. 같은 고객사 품번이 서로 다른 천일품번으로 적힌 「충돌」은
+-- 막지 않고 두 행으로 남긴다(도구가 경고하고 위쪽 행 = source_row 가 작은 쪽을 쓴다). 똑같은 줄 반복은 UNIQUE 가 막는다.
+create table if not exists public.part_mapping (
+  id            bigint generated always as identity primary key,
+  owner_id      uuid not null default auth.uid(),
+  map_group     text not null check (map_group in ('doosan', 'bobcat')),   -- doosan = 건기·엔진(AM·CKD 포함) / bobcat = 밥캣
+  customer_pn   text not null check (length(btrim(customer_pn)) > 0),     -- 고객사 품번(대문자·공백 없앤 열쇠)
+  company_pn    text not null check (length(btrim(company_pn)) > 0),      -- 천일품번
+  source_file   text not null default '',
+  source_row    int check (source_row > 0),
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now(),
+  -- ⚠ upsert 시 onConflict: 'owner_id,map_group,customer_pn,company_pn'
+  constraint part_mapping_pair_key unique (owner_id, map_group, customer_pn, company_pn)
+);
+create index if not exists part_mapping_lookup_idx on public.part_mapping (owner_id, map_group, customer_pn);
+
+-- ERP 업로드 양식 설정 (upload.js defaultOptions + 넣은 양식의 머리행) — 사용자당 한 행
+create table if not exists public.upload_setting (
+  owner_id          uuid primary key default auth.uid(),
+  template_sheet    text not null default '웹자료올리기',
+  template_headers  text[] not null default '{}',                      -- 비면 내장 기본 양식(17열)
+  date_mode         text not null default 'today' check (date_mode in ('today', 'order', 'base')),
+  date_format       text not null default 'dash' check (date_format in ('dash', 'compact')),
+  seq_mode          text not null default 'row' check (seq_mode in ('row', 'party')),
+  top_item          text not null default 'blank' check (top_item in ('blank', 'same')),
+  name_mode         text not null default 'order' check (name_mode in ('order', 'blank')),
+  unmapped          text not null default 'skip' check (unmapped in ('skip', 'keep')),
+  manager           text not null default '',
+  parties           jsonb not null default '{}'::jsonb check (jsonb_typeof(parties) = 'object'),  -- {고객사 · 공장 · 구분: {code, name, manager}}
+  fixed             jsonb not null default '{}'::jsonb check (jsonb_typeof(fixed) = 'object'),    -- {열 이름: 고정값}
+  created_at        timestamptz not null default now(),
+  updated_at        timestamptz not null default now()
+);
+
 -- ----------------------------------------------------------------------------
 -- 2. 함수 — search_path 고정
 -- ----------------------------------------------------------------------------
@@ -328,7 +378,8 @@ declare t text;
 begin
   foreach t in array array['app_members', 'source_file', 'order_line', 'stock_line', 'shipment_line',
                            'column_mapping', 'app_settings', 'plan_edit', 'ai_note',
-                           'intake_setting', 'intake_batch', 'intake_order_line', 'intake_file', 'intake_check']
+                           'intake_setting', 'intake_batch', 'intake_order_line', 'intake_file', 'intake_check',
+                           'part_mapping', 'upload_setting']
   loop
     execute format('drop trigger if exists %I on public.%I', t || '_updated_at', t);
     execute format('create trigger %I before update on public.%I for each row execute function public.set_updated_at()',
@@ -356,6 +407,8 @@ alter table public.intake_batch      enable row level security;
 alter table public.intake_order_line enable row level security;
 alter table public.intake_file       enable row level security;
 alter table public.intake_check      enable row level security;
+alter table public.part_mapping      enable row level security;
+alter table public.upload_setting    enable row level security;
 
 -- 3-1. 팀 구성원 : 본인 행은 본인이 보고, 전체 목록과 등록·변경·해제는 admin 만
 drop policy if exists app_members_select on public.app_members;
@@ -376,7 +429,7 @@ do $rls$
 declare t text;
 begin
   foreach t in array array['source_file', 'column_mapping', 'app_settings', 'plan_edit', 'ai_note',
-                           'intake_setting', 'intake_batch']
+                           'intake_setting', 'intake_batch', 'part_mapping', 'upload_setting']
   loop
     execute format('drop policy if exists %I on public.%I', t || '_select', t);
     execute format('drop policy if exists %I on public.%I', t || '_insert', t);

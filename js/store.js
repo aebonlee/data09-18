@@ -2,6 +2,7 @@
 (function (root) {
   'use strict';
   var KEY = 'data09-18.state';
+  var MAP_KEY = 'data09-18.partMapping'; // 고객사 품번 ↔ 천일품번 매핑표(실제 회사 자료 — 이 브라우저에만, 리포에는 없음)
   var memory = {};
   var ok = true;
   function get(k) {
@@ -22,6 +23,9 @@
       ai: { answer: '', includeName: false },
       intakeOpts: root.SPIntake ? root.SPIntake.defaultOptions() : {}, // 수주 취합 규칙 설정
       intake: null, // 마지막 수주 취합 결과 {base, rows, files, checks, options, at, sample, stockCount, shipCount}
+      mapOpts: { unmapped: 'keep' }, // 매핑 없는 품번: keep 고객사 품번 그대로 계산 | drop 선적계획에서 뺌
+      uploadOpts: root.SPUpload ? root.SPUpload.defaultOptions() : {}, // ERP 업로드 양식 설정(납품처표·고정값)
+      uploadTpl: null, // 사용자가 넣은 업로드 양식의 머리행 {fileName, sheet, headers} — 없으면 내장 기본 양식
       _sample: false
     };
   }
@@ -41,6 +45,9 @@
       st._sample = !!p._sample;
       if (root.SPIntake) st.intakeOpts = (root.SPIntake.upgradeOptions || root.SPIntake.mergeOptions)(p.intakeOpts);
       if (p.intake && Array.isArray(p.intake.rows)) st.intake = p.intake;
+      if (p.mapOpts) st.mapOpts = { unmapped: p.mapOpts.unmapped === 'drop' ? 'drop' : 'keep' };
+      if (root.SPUpload) st.uploadOpts = root.SPUpload.mergeOptions(p.uploadOpts);
+      if (p.uploadTpl && Array.isArray(p.uploadTpl.headers)) st.uploadTpl = p.uploadTpl;
     } catch (e) { /* 깨진 값은 무시하고 빈 상태 */ }
     return st;
   }
@@ -49,6 +56,9 @@
     load: load,
     save: function (st) { set(KEY, JSON.stringify(st)); },
     clear: function () { del(KEY); },
+    loadMapping: function () { var raw = get(MAP_KEY); if (!raw) return null; try { var m = JSON.parse(raw); return m && m.groups ? m : null; } catch (e) { return null; } },
+    saveMapping: function (m) { set(MAP_KEY, JSON.stringify(m)); },
+    clearMapping: function () { del(MAP_KEY); },
     available: function () { get(KEY); return ok; }
   };
 })(window);

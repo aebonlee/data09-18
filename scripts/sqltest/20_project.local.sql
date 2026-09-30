@@ -57,12 +57,12 @@ do $t$ begin
   perform public._assert_eq(
     (select count(*)::int from pg_policy p join pg_class c on c.oid = p.polrelid
       join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public'),
-    58, '두 번 적용해도 정책이 58개 그대로다');
+    66, '두 번 적용해도 정책이 66개 그대로다');
   perform public._assert_eq(
     (select count(*)::int from pg_trigger t join pg_class c on c.oid = t.tgrelid
       join pg_namespace n on n.oid = c.relnamespace
       where n.nspname = 'public' and not t.tgisinternal),
-    14, '두 번 적용해도 updated_at 트리거가 14개 그대로다');
+    16, '두 번 적용해도 updated_at 트리거가 16개 그대로다');
   perform public._assert(public.valid_ship_rule('{"0": null, "1": 2, "2": 2, "3": 2, "4": 4, "5": 3, "6": null}'),
     '원문 입고 규칙(월~수 +2, 목 +4, 금 +3)은 올바른 규칙이다');
   perform public._assert(not public.valid_ship_rule('{"1": 61}'),  '61일 뒤 입고 규칙은 틀린 규칙이다');
@@ -198,6 +198,36 @@ begin
     '23514', '제외 사유는 {사유: 행 수} 객체여야 한다');
 end $t$;
 
+do $t$ begin raise notice '[프로젝트] 품번 매핑·업로드 설정 (기획서 11.10)'; end $t$;
+do $t$
+begin
+  insert into public.part_mapping (map_group, customer_pn, company_pn, source_file, source_row) values
+    ('doosan', 'SMP-C103', 'SMP-C103-완제품', '품번매핑_예시.xlsx', 4),
+    ('bobcat', 'SMP-B705', 'CH-B705', '품번매핑_예시.xlsx', 6),
+    ('bobcat', 'SMP-B705', 'CH-B705-A', '품번매핑_예시.xlsx', 9);   -- 충돌은 두 행으로 남는다
+  perform public._assert_eq((select count(*)::int from public.part_mapping where customer_pn = 'SMP-B705'), 2,
+    '같은 고객사 품번의 서로 다른 천일품번(충돌)은 두 행으로 남는다');
+  perform public._assert_raises(
+    $q$insert into public.part_mapping (map_group, customer_pn, company_pn) values ('bobcat', 'SMP-B705', 'CH-B705')$q$,
+    '23505', '똑같은 매핑 줄은 두 번 들어가지 않는다');
+  insert into public.part_mapping (map_group, customer_pn, company_pn, source_row) values ('bobcat', 'SMP-B705', 'CH-B705', 6)
+    on conflict (owner_id, map_group, customer_pn, company_pn) do update set source_row = excluded.source_row;
+  perform public._assert_raises(
+    $q$insert into public.part_mapping (map_group, customer_pn, company_pn) values ('기타', 'X', 'Y')$q$,
+    '23514', '매핑 묶음은 doosan/bobcat 만 받는다');
+  perform public._assert_raises(
+    $q$insert into public.part_mapping (map_group, customer_pn, company_pn) values ('doosan', 'X', '  ')$q$,
+    '23514', '천일품번이 빈 매핑 줄은 받지 않는다');
+  insert into public.upload_setting default values;
+  perform public._assert_eq((select unmapped from public.upload_setting), 'skip', '업로드 기본값: 매핑 없는 품번은 빼고 내보낸다');
+  perform public._assert_eq((select template_sheet from public.upload_setting), '웹자료올리기', '업로드 기본 시트 이름은 「웹자료올리기」다');
+  perform public._assert_raises($q$update public.upload_setting set seq_mode = 'item'$q$, '23514', '순번 방식은 row/party 만 받는다');
+  perform public._assert_raises($q$update public.upload_setting set parties = '[]'$q$, '23514', '납품처 설정표는 객체여야 한다');
+  perform public._assert_raises(format(
+    $q$insert into public.intake_order_line (batch_id, kind, item, qty, due_date, source_file, source_row, map_status) values (%s, '엔진', 'X', 1, '2026-10-01', 'f', '77', 'maybe')$q$, current_setting('test.a_batch')),
+    '23514', '통합 수주의 매핑 상태는 정해진 값만 받는다');
+end $t$;
+
 do $t$ begin raise notice '[프로젝트] 기록성 표(shipment_plan_log)'; end $t$;
 do $t$ begin
   perform public._assert_rows('update public.shipment_plan_log set qty = 0',
@@ -220,7 +250,8 @@ begin
   perform public._assert(not public.is_member(), 'B 는 구성원이 아니다');
   foreach t in array array['app_members', 'source_file', 'order_line', 'stock_line', 'shipment_line',
                            'column_mapping', 'app_settings', 'plan_edit', 'ai_note', 'shipment_plan_log',
-                           'intake_setting', 'intake_batch', 'intake_order_line', 'intake_file', 'intake_check']
+                           'intake_setting', 'intake_batch', 'intake_order_line', 'intake_file', 'intake_check',
+                           'part_mapping', 'upload_setting']
   loop
     perform public._assert_rows(format('select 1 from public.%I', t), 0, 'B 에게 A 의 ' || t || ' 가 안 보인다');
   end loop;
@@ -293,7 +324,8 @@ declare t text;
 begin
   foreach t in array array['app_members', 'source_file', 'order_line', 'stock_line', 'shipment_line',
                            'column_mapping', 'app_settings', 'plan_edit', 'ai_note', 'shipment_plan_log',
-                           'intake_setting', 'intake_batch', 'intake_order_line', 'intake_file', 'intake_check']
+                           'intake_setting', 'intake_batch', 'intake_order_line', 'intake_file', 'intake_check',
+                           'part_mapping', 'upload_setting']
   loop
     perform public._assert_rows(format('select 1 from public.%I', t), 0, 'anon 에게 ' || t || ' 가 안 보인다');
   end loop;
@@ -345,6 +377,8 @@ end $t$;
 -- 정리
 delete from public.intake_batch;
 delete from public.intake_setting;
+delete from public.part_mapping;
+delete from public.upload_setting;
 delete from public.shipment_plan_log;
 delete from public.ai_note;
 delete from public.plan_edit;

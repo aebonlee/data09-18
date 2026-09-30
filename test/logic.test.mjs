@@ -408,4 +408,106 @@ test('「이 수주로 선적계획 계산」: 통합 표 → 입력 ① 수주�
   assert.equal(sheets['통합수주'].length, RS.rows.length + 1);
 });
 
+console.log('품번 매핑표 (고객사 품번 → 천일품번, 기획서 11.10)');
+const M = require('../js/mapping.js');
+const U = require('../js/upload.js');
+const MAP = M.merge(null, M.parseBook(IS.mappingBook(), '품번매핑_예시.xlsx'), '품번매핑_예시.xlsx', 't');
+const MI = M.apply(RS.rows, MAP, {});
+const rowOf = (item) => MI.rows.find((r) => r.item === item);
+test('매핑표 읽기: 시트 이름으로 두 묶음, 읽은 행·고유 품번·같은 줄 반복·빈 칸·충돌을 셈', () => {
+  assert.deepEqual(Object.keys(MAP.groups).sort(), ['bobcat', 'doosan']);
+  assert.deepEqual(MAP.groups.doosan.stats, { rows: 18, pairs: 17, blank: 0, dupSame: 1, conflicts: 0, same: 14, manyToOne: 0 });
+  assert.deepEqual(MAP.groups.bobcat.stats, { rows: 8, pairs: 5, blank: 1, dupSame: 1, conflicts: 1, same: 3, manyToOne: 0 });
+  assert.deepEqual(MAP.groups.bobcat.conflicts['SMP-B705'], ['CH-B705', 'CH-B705-A']);
+  assert.equal(MAP.groups.bobcat.map['SMP-B705'], 'CH-B705'); // 충돌이면 위쪽 행 값
+});
+test('매핑표 CSV(시트 하나): 파일 이름으로 묶음, 넣은 묶음만 바뀌고 다른 묶음은 그대로 · 묶음을 모르면 알림', () => {
+  const csv = { names: ['Sheet1'], sheets: { Sheet1: [['고객사', '천일품번'], ['smp-b701 ', 'CH-NEW']] } };
+  const m2 = M.merge(MAP, M.parseBook(csv, '품번매핑_밥캣.csv'), '품번매핑_밥캣.csv');
+  assert.equal(m2.groups.bobcat.map['SMP-B701'], 'CH-NEW'); // 소문자·공백 차이는 흡수
+  assert.equal(m2.groups.doosan, MAP.groups.doosan);
+  const bad = M.parseBook(csv, '매핑.csv');
+  assert.equal(Object.keys(bad.groups).length, 0);
+  assert.match(bad.problems[0], /건기·엔진인지 밥캣인지/);
+  const byCol = M.parseBook({ names: ['s'], sheets: { s: [['구분', '고객사', '천일품번'], ['밥캣', 'Q1', 'C1'], ['건기', 'Q1', 'C2']] } }, 'x.csv');
+  assert.equal(byCol.groups.bobcat.map.Q1, 'C1'); assert.equal(byCol.groups.doosan.map.Q1, 'C2'); // 묶음이 다르면 충돌 아님
+});
+test('매핑 적용: 천일품번 칸, 건기·엔진·AM·CKD 는 건기엔진 시트 · 밥캣은 밥캣 시트 · 발주서는 대상 아님', () => {
+  assert.equal(rowOf('SMP-C103').company, 'SMP-C103-완제품');
+  assert.equal(rowOf('SMP-E305').company, 'CH-E305');
+  assert.equal(rowOf('SMP-K601').company, 'CH-K601'); // CKD
+  assert.equal(rowOf('SMP-B704').company, 'CH-B704');
+  assert.equal(rowOf('SMP-P801').mapStatus, 'none'); assert.equal(rowOf('SMP-P801').company, 'SMP-P801');
+  assert.equal(MI.rows.length, RS.rows.length); assert.equal(RS.rows[0].company, undefined); // 원본 행은 그대로
+});
+test('매핑 없음: 품번마다 ★확인 필요 한 줄 + 개수, 기본은 고객사 품번 그대로 계산 · drop 이면 선적계획에서 뺌', () => {
+  const miss = MI.checks.filter((c) => c.kind === 'unmapped');
+  assert.deepEqual(miss.map((c) => c.item).sort(), ['SMP-A502', 'SMP-B706']);
+  assert.equal(MI.stats.unmappedItems, 2);
+  assert.equal(MI.stats.unmapped, MI.rows.filter((r) => r.mapStatus === 'unmapped').length);
+  assert.equal(rowOf('SMP-A502').company, 'SMP-A502');
+  assert.equal(M.planRows(MI.rows, { unmapped: 'keep' }).length, MI.rows.length);
+  assert.equal(M.planRows(MI.rows, { unmapped: 'drop' }).length, MI.rows.length - MI.stats.unmapped);
+  assert.equal(M.apply(RS.rows, null).checks.length, 0); // 매핑표가 없으면 알림 없이 그대로
+});
+test('매핑 충돌 경고: 같은 고객사 품번 → 서로 다른 천일품번이면 ★확인 필요 「매핑 충돌」(위쪽 값으로 계산)', () => {
+  const c = MI.checks.filter((x) => x.kind === 'conflict');
+  assert.equal(c.length, 1); assert.equal(c[0].item, 'SMP-B705');
+  assert.match(c[0].detail, /CH-B705 \/ CH-B705-A/);
+  assert.equal(rowOf('SMP-B705').mapStatus, 'conflict'); assert.equal(rowOf('SMP-B705').company, 'CH-B705');
+});
+test('재고 맞추기는 천일품번으로: C103 은 매핑 후에야 재고 「SMP-C103-완제품」 4 와 맞음', () => {
+  const run = (rows) => {
+    const aoa = I.ordersAoa(rows), m = L.guessMapping(aoa[0], 'orders');
+    return L.compute({ orders: L.mapRows(aoa, 0, m, 'orders').rows, stock: RS.stock, shipments: RS.shipments }, { baseDate: RS.base });
+  };
+  const before = run(RS.rows), after = run(MI.rows);
+  assert.equal(before.results.find((r) => r.item === 'SMP-C103').stock, 0);
+  const c = after.results.find((r) => r.item === 'SMP-C103-완제품');
+  assert.equal(c.stock, 4); assert.equal(c.orderSum, rowOf('SMP-C103').qty);
+  assert.equal(I.ordersAoa(MI.rows)[0][8], '고객사 품목코드');
+  assert.equal(I.exportSheets({ rows: MI.rows, files: RS.files, checks: MI.checks })['통합수주'][0][4], '천일품번');
+});
+
+console.log('ERP 업로드 양식 내보내기');
+const TODAY = '2026-09-30';
+test('내장 양식 = 수강생 양식 머리행 17열 순서 그대로, 시트 「웹자료올리기」', () => {
+  const out = U.build(MI.rows, null, {}, { today: TODAY, base: RS.base });
+  assert.equal(out.sheet, '웹자료올리기');
+  assert.deepEqual(out.aoa[0], ['일자', '순번', '추가문자형식1', '납품처 코드', '납품처명', '담당자', '납기일자', '품목코드(상단)', '작업지시No.', '품목코드', '품목명', 'BOM버전', '규격', '수량', '창고', '적요', '하위반제품수']);
+  assert.deepEqual(U.readTemplate({ names: ['웹자료올리기'], sheets: { '웹자료올리기': [IS.TEMPLATE_HEAD] } }).headers, out.aoa[0]);
+});
+test('값: 일자 = 오늘, 순번 1…N, 납기일자, 품목코드 = 천일품번, 수량 · 매핑 없는 행은 기본으로 뺌', () => {
+  const out = U.build(MI.rows, null, {}, { today: TODAY, base: RS.base });
+  assert.equal(out.count, MI.rows.length - MI.stats.unmapped); assert.equal(out.skipped.unmapped, MI.stats.unmapped);
+  const H = out.aoa[0], col = (n) => H.indexOf(n), body = out.aoa.slice(1);
+  assert.ok(body.every((r, i) => r[col('일자')] === TODAY && r[col('순번')] === i + 1));
+  const c103 = body.find((r) => r[col('품목코드')] === 'SMP-C103-완제품');
+  const src = rowOf('SMP-C103');
+  assert.equal(c103[col('수량')], src.qty); assert.equal(c103[col('납기일자')], src.due);
+  assert.ok(!body.some((r) => r[col('품목코드')] === 'SMP-A502'));
+  assert.equal(c103[col('납품처 코드')], ''); assert.equal(c103[col('작업지시No.')], ''); // 채울 수 없는 열은 빈칸
+  assert.equal(U.build(MI.rows, null, { unmapped: 'keep' }, { today: TODAY }).count, MI.rows.length);
+});
+test('사용자 양식이면 그 열 순서를 따름 · 납품처표·고정값·일자(발주일)·순번(납품처별)·날짜 모양 설정', () => {
+  const tpl = U.readTemplate({ names: ['기타', '웹자료올리기'], sheets: { '기타': [['x']], '웹자료올리기': [['안내문'], ['수량', '품목코드', '창고', '일자', '순번', '납품처 코드', '없는열']] } });
+  assert.equal(tpl.sheet, '웹자료올리기'); assert.equal(tpl.headerRow, 1);
+  const rows = MI.rows.filter((r) => r.group === '엔진' || r.group === '밥캣');
+  const eng = rows.find((r) => r.group === '엔진'), key = U.partyKey(eng);
+  const parties = {}; U.partyKeys(rows).forEach((k, i) => { parties[k] = { code: k === key ? 'D-01' : 'P' + i }; });
+  assert.ok(U.partyKeys(rows).length >= 3);
+  const out = U.build(rows, tpl, { dateMode: 'order', dateFormat: 'compact', seqMode: 'party', unmapped: 'keep', parties, fixed: { '창고': 'W1' } }, { today: TODAY });
+  assert.deepEqual(out.aoa[0], ['수량', '품목코드', '창고', '일자', '순번', '납품처 코드', '없는열']);
+  assert.deepEqual(out.unknown, ['창고', '없는열']);
+  const body = out.aoa.slice(1);
+  assert.ok(body.every((r) => r[2] === 'W1' && r[6] === '' && /^\d{8}$/.test(r[3])));
+  const engRow = body.find((r) => r[5] === 'D-01');
+  assert.equal(engRow[3], eng.orderDate.replace(/-/g, ''));
+  // 같은 일자·납품처 → 같은 순번, 다르면 다른 순번
+  const seqByKey = {};
+  body.forEach((r, i) => { const k = r[3] + '|' + r[5]; (seqByKey[k] = seqByKey[k] || new Set()).add(r[4]); });
+  assert.ok(Object.values(seqByKey).every((s) => s.size === 1));
+  assert.equal(new Set(body.map((r) => r[4])).size, Object.keys(seqByKey).length); // 전표마다 다른 순번
+});
+
 console.log(`\n${passed}개 통과`);

@@ -30,9 +30,11 @@
 | `shipment_plan_log` | 확정·공유한 선적계획 기록(품번, 필요일, 선적일, 입고일, 수량, 상태) | 없음(새로 추가, 3단계용) |
 | `intake_setting` | 수주 취합 규칙 설정(엔진 결품 납기 당김 일수, 결품·납품예정 겹침 처리, 직송 수집, 월 단위 칸, 발주서 시트, 고객사 이름) | `intakeOpts` |
 | `intake_batch` | 파일 묶음을 한 번 취합한 결과(기준일, 그때 쓴 설정, 파일·행·★확인 건수) | `intake` 의 `base`·`options`·`sample` |
-| `intake_order_line` | 통합 수주 표 한 행(고객사, 공장, 구분, 품목코드, 수량, 납기일, 원납기, 발주일, 원본파일·시트·행, 규칙, 비고) | `intake.rows` |
+| `intake_order_line` | 통합 수주 표 한 행(고객사, 공장, 구분, 품목코드, 천일품번·매핑 상태, 수량, 납기일, 원납기, 발주일, 원본파일·시트·행, 규칙, 비고) | `intake.rows` |
 | `intake_file` | 파일별 집계(판별 종류, 읽은 행, 수집, 규칙으로 뺀 행과 사유, 메모) | `intake.files` |
 | `intake_check` | 「★확인 필요」 한 줄(파일, 행, 내용, 자세히) | `intake.checks` |
+| `part_mapping` | 고객사 품번 → 천일품번(묶음 doosan 건기·엔진 / bobcat 밥캣). 충돌은 두 행으로 남김 | `data09-18.partMapping`(별도 키) |
+| `upload_setting` | ERP 업로드 양식 설정(양식 머리행, 일자·순번·품목코드(상단)·품목명 방식, 매핑 없는 품번, 납품처 설정표, 고정값) | `uploadOpts`·`uploadTpl` |
 
 지켜지는 규칙은 다음과 같습니다.
 
@@ -75,8 +77,8 @@
 
 ## 확인 방법
 
-- Table Editor 에 위 표의 테이블 15개가 보이면 됩니다.
-- Authentication → Policies 에서 15개 테이블 모두 RLS 가 켜져 있고 정책이 붙어 있는지 확인합니다.
+- Table Editor 에 위 표의 테이블 17개가 보이면 됩니다.
+- Authentication → Policies 에서 17개 테이블 모두 RLS 가 켜져 있고 정책이 붙어 있는지 확인합니다.
 - SQL Editor 에서 다음을 실행하면 정책 58개가 나와야 합니다.
 
   ```sql

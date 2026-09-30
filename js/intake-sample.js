@@ -189,5 +189,23 @@
       return { name: x.name, hash: 'sample:' + x.name, sheets: { names: Object.keys(x.sheets), sheets: x.sheets } };
     });
   }
-  return { BASE: BASE, files: files, asInput: asInput, PDF_ITEMS: PDF_ITEMS };
+  // ── 품번 매핑표(고객사 품번 → 천일품번) 예시 — 실제 매핑표와 같은 시트 이름·열(고객사 | 천일품번), 품번은 가상 ──
+  // 대부분 두 품번이 같고(실제 매핑표도 그렇습니다), CH- 로 시작하는 것만 당사 품번이 다릅니다.
+  // 일부러 넣은 것: 같은 줄 반복(C101·B701), 빈 칸 1행, 매핑 충돌(B705 → 두 값), 매핑 없음(AM A502 · 밥캣 B706)
+  var MAPPING = {
+    '건기엔진품목코드': [['고객사', '천일품번'],
+      ['SMP-C101', 'SMP-C101'], ['SMP-C102', 'SMP-C102'], ['SMP-C103', 'SMP-C103-완제품'], ['SMP-C104', 'SMP-C104'], ['SMP-C105', 'SMP-C105'],
+      ['SMP-E301', 'SMP-E301'], ['SMP-E302', 'SMP-E302'], ['SMP-E303', 'SMP-E303'], ['SMP-E304', 'SMP-E304'], ['SMP-E305', 'CH-E305'], ['SMP-E306', 'SMP-E306'],
+      ['SMP-E401', 'SMP-E401'], ['SMP-G201', 'SMP-G201'], ['SMP-G202', 'SMP-G202'], ['SMP-A501', 'SMP-A501'], ['SMP-K601', 'CH-K601'],
+      ['SMP-C101', 'SMP-C101'], ['SMP-X901', 'SMP-X901']],
+    '밥캣품목코드': [['고객사', '천일품번'],
+      ['SMP-B701', 'SMP-B701'], ['SMP-B702', 'SMP-B702'], ['SMP-B703', 'SMP-B703'], ['SMP-B704', 'CH-B704'], ['SMP-B705', 'CH-B705'],
+      ['SMP-B701', 'SMP-B701'], ['', 'CH-B799'], ['SMP-B705', 'CH-B705-A']]
+  };
+  function mappingBook() { return { names: Object.keys(MAPPING), sheets: MAPPING }; }
+  // ── ERP 업로드 양식 예시 — 머리행만(수강생 양식과 같은 17열). 열 이름은 일반 명칭입니다 ──
+  var TEMPLATE_HEAD = ['일자', '순번', '추가문자형식1', '납품처 코드', '납품처명', '담당자', '납기일자', '품목코드(상단)', '작업지시No.',
+    '품목코드', '품목명', 'BOM버전', '규격', '수량', '창고', '적요', '하위반제품수'];
+
+  return { BASE: BASE, files: files, asInput: asInput, PDF_ITEMS: PDF_ITEMS, MAPPING: MAPPING, mappingBook: mappingBook, TEMPLATE_HEAD: TEMPLATE_HEAD };
 });

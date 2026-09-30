@@ -3,8 +3,10 @@
 (function () {
   'use strict';
   var L = window.SPLogic, S = window.SPStore, Sample = window.SPSample, I = window.SPIntake, ISample = window.SPIntakeSample;
+  var M = window.SPMapping, U = window.SPUpload;
   var KEYS = ['orders', 'stock', 'shipments'];
   var st = S.load();
+  var partMap = S.loadMapping(); // 고객사 품번 → 천일품번 매핑표(이 브라우저에만 저장, 기획서 11.10)
   var pendingSheets = { orders: null, stock: null, shipments: null }; // 방금 연 파일의 시트들(시트 바꾸기용, 저장 안 함)
   var main = document.getElementById('main');
 
@@ -445,8 +447,8 @@
         h('label', { class: 'field', style: 'flex:1 1 220px' }, h('span', null, '통합 파일 불러오기'), whole)),
       h('hr', { style: 'border:none;border-top:1px solid var(--line);margin:16px 0' }),
       h('button', { type: 'button', class: 'btn btn-danger', onclick: function () {
-        if (!window.confirm('불러온 자료·설정·선적계획 수정·AI 답·수주 취합 결과를 모두 지웁니다. 계속할까요?')) return;
-        S.clear(); st = S.empty(); intakeFiles = null; intakeSide = { stock: null, shipments: null }; save(); render(); toast('모두 지웠습니다');
+        if (!window.confirm('불러온 자료·설정·선적계획 수정·AI 답·수주 취합 결과·품번 매핑표·업로드 양식 설정을 모두 지웁니다. 계속할까요?')) return;
+        S.clear(); S.clearMapping(); partMap = null; st = S.empty(); intakeFiles = null; intakeSide = { stock: null, shipments: null }; save(); render(); toast('모두 지웠습니다');
       } }, '모두 지우기')));
   }
   function datasetCard(k) {
@@ -663,11 +665,45 @@
     runIntake(true); render();
     toast('예시 파일 ' + intakeFiles.length + '개로 취합했습니다(가상 데이터)');
   }
+  /** 통합 수주에 매핑표를 적용한 결과 {rows, checks, stats} — 저장된 결과에도 매번 새로 적용합니다(매핑표를 바꾸면 바로 반영) */
+  function mappedIntake() { return st.intake ? M.apply(st.intake.rows, partMap, st.mapOpts) : null; }
+  function readMappingFile(file) {
+    readFile(file, function (err, book) {
+      if (err) { toast('매핑표를 읽지 못했습니다: ' + (err.message || err), true); return; }
+      var p = M.parseBook(book, file.name);
+      if (!Object.keys(p.groups).length) { toast(p.problems[0] || '매핑표에서 읽은 행이 없습니다', true); return; }
+      partMap = M.merge(partMap, p, file.name, new Date().toISOString());
+      partMap.problems = p.problems;
+      S.saveMapping(partMap); render();
+      toast('매핑표를 읽었습니다 — ' + Object.keys(p.groups).map(function (g) { return M.GROUPS[g].label + ' ' + n(p.groups[g].pairs) + '개'; }).join(', '));
+    });
+  }
+  function readTemplateFile(file) {
+    readFile(file, function (err, book) {
+      if (err) { toast('양식 파일을 읽지 못했습니다: ' + (err.message || err), true); return; }
+      var t = U.readTemplate(book);
+      if (t.error) { toast(t.error, true); return; }
+      st.uploadTpl = { fileName: file.name, sheet: t.sheet, headers: t.headers };
+      save(); render(); toast('업로드 양식을 읽었습니다 — 시트「' + t.sheet + '」 ' + t.headers.length + '열');
+    });
+  }
+  function uploadTemplate() { return st.uploadTpl || U.defaultTemplate(); }
+  function exportUpload() {
+    var mi = mappedIntake();
+    if (!mi || !mi.rows.length) { toast('내보낼 수주가 없습니다', true); return; }
+    var out = U.build(mi.rows, uploadTemplate(), st.uploadOpts, { today: L.todayIso(), base: st.intake.base });
+    if (!out.count) { toast('내보낼 행이 없습니다(매핑 없는 ' + out.skipped.unmapped + '행은 설정대로 뺐습니다)', true); return; }
+    var sheets = {}; sheets[out.sheet] = out.aoa;
+    writeXlsx(sheets, '업로드양식_' + st.intake.base + (st.intake.sample ? '_예시데이터' : '') + '.xlsx');
+    toast('업로드 양식 ' + out.count + '행을 내보냈습니다' + (out.skipped.unmapped ? ' · 매핑 없는 ' + out.skipped.unmapped + '행은 뺐습니다' : ''));
+  }
   function sendIntakeToPlan() {
     var r = st.intake;
     if (!r || !r.rows.length) { toast('넘길 수주가 없습니다', true); return; }
-    setTable('orders', '수주취합_' + r.base + '.xlsx', '수주현황', I.ordersAoa(r.rows)); pendingSheets.orders = null;
-    var sent = ['수주 ' + r.rows.length + '행'];
+    var mi = mappedIntake(), planRows = M.planRows(mi.rows, st.mapOpts);
+    if (!planRows.length) { toast('넘길 수주가 없습니다(매핑 없는 행을 모두 뺐습니다)', true); return; }
+    setTable('orders', '수주취합_' + r.base + '.xlsx', '수주현황', I.ordersAoa(planRows)); pendingSheets.orders = null;
+    var sent = ['수주 ' + planRows.length + '행' + (mi.stats.loaded ? '(천일품번으로)' : '')];
     if (intakeSide.stock) { setTable('stock', '창고별재고현황(수주 취합에서).xlsx', '재고현황', L.dataSheets({ stock: intakeSide.stock })['재고현황']); pendingSheets.stock = null; sent.push('재고 ' + intakeSide.stock.length + '행'); }
     if (intakeSide.shipments) { setTable('shipments', '선적계획(수주 취합에서).xlsx', '선적예정', L.dataSheets({ shipments: intakeSide.shipments })['선적예정']); pendingSheets.shipments = null; sent.push('선적예정 ' + intakeSide.shipments.length + '행'); }
     var missing = (r.stockCount && !intakeSide.stock) || (r.shipCount && !intakeSide.shipments);
@@ -738,27 +774,43 @@
         textIn('portalCustomer', '포털 파일 고객사 이름', '건기·엔진·AM·CKD 파일에는 고객사 이름이 없어 여기 적은 이름을 씁니다'),
         textIn('bobcatCustomer', '밥캣 파일 고객사 이름'))));
 
+    main.appendChild(mappingCard());
+
     var r = st.intake;
     if (!r) { main.appendChild(h('div', { class: 'card empty' }, h('p', null, '아직 취합한 파일이 없습니다.'), h('p', { class: 'note' }, '파일을 넣거나 「예시 파일로 해 보기」로 먼저 둘러보세요.'))); return; }
+    var mi = mappedIntake(), allChecks = mi.checks.concat(r.checks);
+    var unmappedChecks = mi.checks.filter(function (c) { return c.kind === 'unmapped'; });
     if (r.sample) main.appendChild(h('div', { class: 'alert warn' }, '예시(가상) 파일로 만든 결과입니다. 품번·수량·고객사는 실제 자료가 아닙니다.'));
     if (!intakeFiles) main.appendChild(h('div', { class: 'alert info' }, '이전에 만든 결과입니다(' + r.at.slice(0, 16).replace('T', ' ') + '). 규칙을 바꾸거나 재고·선적계획까지 넘기려면 파일을 다시 넣어 주세요.'));
 
-    var sum = I.summary(r);
+    var sum = I.summary({ files: r.files, rows: r.rows, checks: allChecks });
     main.appendChild(h('div', { class: 'kpis' },
       h('div', { class: 'kpi' }, h('div', { class: 'k' }, '넣은 파일'), h('div', { class: 'v' }, n(sum.files)), h('div', { class: 's' }, '기준일 ' + r.base)),
       h('div', { class: 'kpi' }, h('div', { class: 'k' }, '읽은 행'), h('div', { class: 'v' }, n(sum.read)), h('div', { class: 's' }, '규칙으로 뺀 행 ' + n(sum.excluded))),
       h('div', { class: 'kpi' }, h('div', { class: 'k' }, '통합 수주'), h('div', { class: 'v' }, n(sum.rows) + '행'), h('div', { class: 's' }, '수량 합계 ' + n(sum.qty))),
+      h('div', { class: 'kpi' + (mi.stats.unmapped ? ' alert-kpi' : '') }, h('div', { class: 'k' }, '천일품번 매핑'),
+        h('div', { class: 'v' }, mi.stats.loaded ? n(mi.stats.mapped + mi.stats.conflict) + '행' : '매핑표 없음'),
+        h('div', { class: 's' }, mi.stats.loaded ? '매핑 없음 ' + n(mi.stats.unmappedItems) + '품번(' + n(mi.stats.unmapped) + '행) · 대상 아님 ' + n(mi.stats.none) + '행' : '위 3번에 매핑표를 넣어 주세요')),
       h('button', { type: 'button', class: 'kpi kpi-btn' + (sum.checks ? ' alert-kpi' : ''), onclick: function () { var el = document.getElementById('intake-checks'); if (el) el.scrollIntoView({ behavior: 'smooth' }); } }, h('div', { class: 'k' }, '★확인 필요'), h('div', { class: 'v' }, n(sum.checks) + '건'), h('div', { class: 's' }, sum.checks ? '아래 목록을 확인해 주세요' : '없습니다'))));
 
-    main.appendChild(h('div', { class: 'card' }, h('h2', null, '3. 결과 쓰기'),
+    main.appendChild(h('div', { class: 'card' }, h('h2', null, '4. 결과 쓰기'),
       h('div', { class: 'btn-row' },
         h('button', { type: 'button', class: 'btn btn-primary', onclick: sendIntakeToPlan, disabled: r.rows.length ? null : true }, '이 수주로 선적계획 계산'),
         h('button', { type: 'button', class: 'btn', onclick: function () {
-          var sheets = I.exportSheets({ rows: r.rows, files: r.files, checks: r.checks, stock: intakeSide.stock, shipments: intakeSide.shipments });
+          var sheets = I.exportSheets({ rows: mi.rows, files: r.files, checks: allChecks, stock: intakeSide.stock, shipments: intakeSide.shipments });
           writeXlsx(sheets, '수주취합_' + r.base + (r.sample ? '_예시데이터' : '') + '.xlsx');
-        } }, '통합 수주 Excel 내려받기')),
-      h('p', { class: 'note', style: 'margin-top:8px' }, '「이 수주로 선적계획 계산」은 통합 수주를 입력 ① 수주현황으로, 선적계획 파일(' + (r.shipCount || 0) + '행)은 입력 ③ 선적예정으로, 창고별재고현황(' + (r.stockCount || 0) + '행)은 입력 ② 재고현황으로 넘기고 기준일을 맞춘 뒤 대시보드로 갑니다. 넣지 않은 자료는 지금 들어 있는 것을 그대로 둡니다.'),
-      h('p', { class: 'note' }, 'Excel 시트: 통합수주 · 파일별집계 · ★확인필요 · 수주현황(이 도구 표준 열)' + (intakeSide.stock ? ' · 재고현황' : '') + (intakeSide.shipments ? ' · 선적예정' : '') + '.')));
+        } }, '통합 수주 Excel 내려받기'),
+        h('button', { type: 'button', class: 'btn', onclick: exportUpload, disabled: r.rows.length ? null : true }, '업로드 양식으로 내보내기')),
+      h('p', { class: 'note', style: 'margin-top:8px' }, '「이 수주로 선적계획 계산」은 통합 수주를 ' + (mi.stats.loaded ? '천일품번으로 바꿔 ' : '') + '입력 ① 수주현황으로, 선적계획 파일(' + (r.shipCount || 0) + '행)은 입력 ③ 선적예정으로, 창고별재고현황(' + (r.stockCount || 0) + '행)은 입력 ② 재고현황으로 넘기고 기준일을 맞춘 뒤 대시보드로 갑니다. 넣지 않은 자료는 지금 들어 있는 것을 그대로 둡니다.'),
+      h('p', { class: 'note' }, 'Excel 시트: 통합수주 · 파일별집계 · ★확인필요 · 수주현황(이 도구 표준 열)' + (intakeSide.stock ? ' · 재고현황' : '') + (intakeSide.shipments ? ' · 선적예정' : '') + '. 「업로드 양식으로 내보내기」는 아래 5번 설정대로 시트「' + uploadTemplate().sheet + '」 ' + uploadTemplate().headers.length + '열을 씁니다.')));
+
+    // ★확인 필요 — 매핑 없음
+    if (mi.stats.loaded) main.appendChild(h('div', { class: 'card', id: 'intake-unmapped' }, h('h2', null, '★확인 필요 — 매핑 없음 ' + unmappedChecks.length + '건'),
+      h('p', { class: 'note' }, '매핑표에 없는 고객사 품번입니다(' + n(mi.stats.unmapped) + '행). ' + (st.mapOpts.unmapped === 'drop' ? '설정대로 선적계획에서 뺐습니다.' : '고객사 품번 그대로 선적계획을 계산했습니다.') + ' 업로드 양식에서는 ' + (st.uploadOpts.unmapped === 'keep' ? '고객사 품번 그대로 내보냅니다.' : '빼고 내보냅니다.') + ' 매핑표에 추가한 뒤 다시 넣어 주세요.'),
+      unmappedChecks.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'list' },
+        h('thead', null, h('tr', null, ['묶음', '고객사 품번', '자세히', '원본파일'].map(function (x) { return h('th', null, x); }))),
+        h('tbody', null, unmappedChecks.map(function (c) { return h('tr', null, h('td', null, M.GROUPS[c.group].label), h('td', { class: 'nowrap' }, h('strong', null, c.item)), h('td', null, c.detail), h('td', null, c.file)); }))))
+        : h('p', { class: 'note' }, '매핑표에 없는 품번이 없습니다.')));
 
     // 파일별 집계
     main.appendChild(h('div', { class: 'card' }, h('h2', null, '파일별 결과 ' + r.files.length + '개'),
@@ -772,15 +824,16 @@
         }))))));
 
     // ★확인 필요
-    main.appendChild(h('div', { class: 'card', id: 'intake-checks' }, h('h2', null, '★확인 필요 ' + r.checks.length + '건'),
-      r.checks.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'list' },
+    var otherChecks = allChecks.filter(function (c) { return c.kind !== 'unmapped'; });
+    main.appendChild(h('div', { class: 'card', id: 'intake-checks' }, h('h2', null, '★확인 필요 ' + otherChecks.length + '건' + (unmappedChecks.length ? ' (매핑 없음 ' + unmappedChecks.length + '건은 위에)' : '')),
+      otherChecks.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'list' },
         h('thead', null, h('tr', null, ['원본파일', '행', '내용', '자세히'].map(function (x) { return h('th', null, x); }))),
-        h('tbody', null, r.checks.map(function (c) { return h('tr', null, h('td', null, c.file), h('td', { class: 'nowrap' }, String(c.row)), h('td', null, h('span', { class: 'tag warn' }, c.reason)), h('td', null, c.detail)); }))))
+        h('tbody', null, otherChecks.map(function (c) { return h('tr', null, h('td', null, c.file), h('td', { class: 'nowrap' }, String(c.row)), h('td', null, h('span', { class: 'tag warn' }, c.reason)), h('td', null, c.detail)); }))))
         : h('p', { class: 'note' }, '판별하지 못한 파일·칸이 없습니다.')));
 
     // 통합 수주 표
     var groups = [];
-    r.rows.forEach(function (x) { if (groups.indexOf(x.group) < 0) groups.push(x.group); });
+    mi.rows.forEach(function (x) { if (groups.indexOf(x.group) < 0) groups.push(x.group); });
     var gsel = h('select', { 'aria-label': '구분' }, h('option', { value: '' }, '전체 구분'), groups.map(function (g) { return h('option', { value: g }, g); }));
     gsel.value = intakeFilter.group;
     var q = h('input', { type: 'search', placeholder: '품목코드·고객사·파일 검색', value: intakeFilter.q, 'aria-label': '통합 수주 검색' });
@@ -788,25 +841,128 @@
     var LIMIT = 300;
     function draw() {
       intakeFilter.group = gsel.value; intakeFilter.q = q.value.trim().toLowerCase();
-      var rows = r.rows.filter(function (x) {
-        return (!intakeFilter.group || x.group === intakeFilter.group) && (!intakeFilter.q || (x.item + ' ' + x.customer + ' ' + x.source + ' ' + (x.name || '')).toLowerCase().indexOf(intakeFilter.q) >= 0);
+      var rows = mi.rows.filter(function (x) {
+        return (!intakeFilter.group || x.group === intakeFilter.group) && (!intakeFilter.q || (x.item + ' ' + x.company + ' ' + x.customer + ' ' + x.source + ' ' + (x.name || '')).toLowerCase().indexOf(intakeFilter.q) >= 0);
       });
       holder.textContent = '';
       holder.appendChild(h('div', { class: 'list-meta' }, h('span', null, rows.length + '행 · 수량 ' + n(rows.reduce(function (s, x) { return s + x.qty; }, 0))), rows.length > LIMIT ? h('span', { class: 'note' }, '화면에는 앞 ' + LIMIT + '행만 보입니다 — 전체는 Excel 로 내려받아 주세요') : null));
       if (!rows.length) { holder.appendChild(h('p', { class: 'empty' }, '조건에 맞는 행이 없습니다.')); return; }
       holder.appendChild(h('div', { class: 'table-wrap' }, h('table', { class: 'list' },
-        h('thead', null, h('tr', null, ['고객사', '공장', '구분', '품목코드', '수량', '납기일', '발주일', '원본파일 / 행', '비고'].map(function (x) { return h('th', { class: x === '수량' ? 'num' : null }, x); }))),
+        h('thead', null, h('tr', null, ['고객사', '공장', '구분', '품목코드', '천일품번', '수량', '납기일', '발주일', '원본파일 / 행', '비고'].map(function (x) { return h('th', { class: x === '수량' ? 'num' : null }, x); }))),
         h('tbody', null, rows.slice(0, LIMIT).map(function (x) {
-          return h('tr', null, h('td', null, x.customer), h('td', null, x.plant), h('td', null, x.group), h('td', { class: 'nowrap' }, h('strong', null, x.item)),
+          return h('tr', null, h('td', null, x.customer), h('td', null, x.plant), h('td', null, x.group), h('td', { class: 'nowrap' }, x.item),
+            h('td', { class: 'nowrap' }, h('strong', null, x.company), x.mapStatus === 'unmapped' || x.mapStatus === 'conflict' ? h('span', { class: 'tag warn' }, M.STATUS_LABEL[x.mapStatus]) : null),
             h('td', { class: 'num' }, n(x.qty)), h('td', { class: 'nowrap' }, L.fmtDate(x.due)), h('td', { class: 'nowrap' }, x.orderDate || ''),
             h('td', null, x.source + (x.sheet && x.sheet !== 'sheet1' && x.sheet !== 'Sheet1' ? ' · ' + x.sheet : '') + ' · ' + x.row), h('td', { class: 'note' }, [x.rule, x.note].filter(Boolean).join(' · ')));
         })))));
     }
     gsel.addEventListener('change', draw); q.addEventListener('input', draw);
     main.appendChild(h('div', { class: 'card' }, h('h2', null, '통합 수주 표'),
-      h('p', { class: 'note' }, '고객사 · 공장 · 구분 · 품목코드 · 수량 · 납기일 · 발주일 · 원본파일/행. 납기일 순입니다.'),
+      h('p', { class: 'note' }, '품목코드는 고객사 품번(파일 그대로), 천일품번은 매핑표로 바꾼 당사 품번입니다. 재고·선적계획은 천일품번으로 맞춥니다. 납기일 순입니다.'),
       h('div', { class: 'form-grid' }, h('label', { class: 'field' }, h('span', null, '구분'), gsel), h('label', { class: 'field' }, h('span', null, '검색'), q)), holder));
     draw();
+    main.appendChild(uploadCard(mi));
+  }
+
+  // 3. 품번 매핑표 카드
+  function mappingCard() {
+    var input = h('input', { type: 'file', accept: '.xlsm,.xlsx,.xls,.csv', 'aria-label': '품번 매핑표 파일' });
+    input.addEventListener('change', function () { if (input.files[0]) readMappingFile(input.files[0]); });
+    var body = [];
+    if (M.has(partMap)) {
+      body.push(h('div', { class: 'table-wrap' }, h('table', { class: 'list' },
+        h('thead', null, h('tr', null, ['묶음', '파일 · 시트', '읽은 행', '고유 품번', '같은 줄 반복', '빈 칸', '두 품번이 같음', '매핑 충돌'].map(function (x, i) { return h('th', { class: i >= 2 ? 'num' : null }, x); }))),
+        h('tbody', null, M.GROUP_KEYS.map(function (g) {
+          var G = partMap.groups[g];
+          if (!G) return h('tr', null, h('td', null, M.GROUPS[g].label), h('td', { colspan: '7', class: 'note' }, '없음 — 이 묶음 수주는 고객사 품번 그대로 계산하고 ★확인 필요에 남깁니다'));
+          var x = G.stats;
+          return h('tr', null, h('td', null, M.GROUPS[g].label), h('td', null, G.file + ' · ' + G.sheet), h('td', { class: 'num' }, n(x.rows)), h('td', { class: 'num' }, n(x.pairs)),
+            h('td', { class: 'num' }, n(x.dupSame)), h('td', { class: 'num' }, n(x.blank)), h('td', { class: 'num' }, n(x.same)),
+            h('td', { class: 'num' }, x.conflicts ? h('span', { class: 'tag warn' }, n(x.conflicts) + '건') : '0'));
+        })))));
+      var confl = [];
+      M.GROUP_KEYS.forEach(function (g) { var G = partMap.groups[g]; if (G) Object.keys(G.conflicts).forEach(function (k) { confl.push({ g: g, k: k, v: G.conflicts[k] }); }); });
+      if (confl.length) body.push(h('div', { class: 'alert warn', style: 'margin-top:12px' },
+        h('strong', null, '매핑 충돌 경고 — 같은 고객사 품번이 서로 다른 천일품번으로 적혀 있습니다. 위쪽 행 값으로 계산합니다.'),
+        h('ul', null, confl.slice(0, 50).map(function (c) { return h('li', null, M.GROUPS[c.g].label + ' 「' + c.k + '」 → ' + c.v.join(' / ')); })),
+        confl.length > 50 ? h('p', { class: 'note' }, '외 ' + (confl.length - 50) + '건') : null));
+      (partMap.problems || []).forEach(function (p) { body.push(h('div', { class: 'alert info', style: 'margin-top:8px' }, p)); });
+    }
+    var um = h('select', { 'aria-label': '매핑 없는 품번', onchange: function () { st.mapOpts = { unmapped: um.value }; save(); render(); } },
+      h('option', { value: 'keep' }, '고객사 품번 그대로 계산(★확인 필요에 남김)'), h('option', { value: 'drop' }, '선적계획에서 뺌(★확인 필요에 남김)'));
+    um.value = st.mapOpts.unmapped;
+    return h('div', { class: 'card' }, h('h2', null, '3. 품번 매핑표 (고객사 품번 → 천일품번)'),
+      h('p', { class: 'note' }, '「건기엔진품목코드」「밥캣품목코드」 시트(열: 고객사 | 천일품번)가 든 매핑표 파일(xlsm·xlsx·csv)을 넣어 주세요. 매크로는 읽지 않고 표만 읽습니다. 매핑표는 이 브라우저에만 저장되고 어디로도 보내지 않습니다. 시트가 하나뿐인 파일(CSV 등)은 파일 이름의 「건기·엔진」「밥캣」으로, 또는 「구분」 열로 묶음을 알아봅니다. 한 묶음만 든 파일을 넣으면 그 묶음만 바뀝니다.'),
+      h('div', { class: 'form-grid' },
+        h('label', { class: 'field' }, h('span', null, M.has(partMap) ? '매핑표 다시 넣기' : '매핑표 넣기'), input,
+          M.has(partMap) ? null : h('button', { type: 'button', class: 'btn', style: 'margin-top:6px', onclick: function () {
+            partMap = M.merge(null, M.parseBook(ISample.mappingBook(), '예시'), '예시 매핑표(가상 품번)', new Date().toISOString());
+            S.saveMapping(partMap); render(); toast('예시 매핑표(가상 품번)를 넣었습니다 — 실제 매핑표를 넣으면 바뀝니다');
+          } }, '예시 매핑표로 해 보기')),
+        h('label', { class: 'field' }, h('span', null, '매핑 없는 고객사 품번'), um, h('small', null, '건기·엔진·AM·CKD 는 건기엔진 시트, 밥캣은 밥캣 시트로 찾습니다. 발주서(그 밖의 고객사)는 매핑표가 없어 품번 그대로 씁니다.'))),
+      body,
+      M.has(partMap) ? h('div', { class: 'btn-row', style: 'margin-top:12px' }, h('button', { type: 'button', class: 'btn btn-danger', onclick: function () {
+        if (!window.confirm('이 브라우저에 저장된 품번 매핑표를 지웁니다. 계속할까요?')) return;
+        S.clearMapping(); partMap = null; render(); toast('매핑표를 지웠습니다');
+      } }, '매핑표 지우기')) : null);
+  }
+
+  // 5. ERP 업로드 양식 카드
+  function uploadCard(mi) {
+    var o = st.uploadOpts, tpl = uploadTemplate();
+    function setUp(k, v) { var x = {}; x[k] = v; st.uploadOpts = U.mergeOptions(Object.assign({}, st.uploadOpts, x)); save(); render(); }
+    function sel(k, opts, label, help) {
+      var s = h('select', { name: 'up-' + k, onchange: function () { setUp(k, s.value); } }, opts.map(function (x) { return h('option', { value: x[0] }, x[1]); }));
+      s.value = o[k];
+      return h('label', { class: 'field' }, h('span', null, label), s, help ? h('small', null, help) : null);
+    }
+    var tin = h('input', { type: 'file', accept: '.xlsx,.xls,.xlsm,.csv', 'aria-label': '업로드 양식 파일' });
+    tin.addEventListener('change', function () { if (tin.files[0]) readTemplateFile(tin.files[0]); });
+    var mgr = h('input', { type: 'text', value: o.manager, onchange: function () { setUp('manager', mgr.value); } });
+    // 납품처 설정표: 통합 수주의 고객사 · 공장 · 구분마다 한 줄
+    var keys = U.partyKeys(mi.rows);
+    var partyRows = keys.map(function (k) {
+      var p = o.parties[k] || {};
+      function cell(f, label) {
+        var i = h('input', { type: 'text', value: p[f] || '', 'aria-label': k + ' ' + label, onchange: function () {
+          var parties = Object.assign({}, st.uploadOpts.parties); parties[k] = Object.assign({}, parties[k] || {}); parties[k][f] = i.value.trim();
+          setUp('parties', parties);
+        } });
+        return h('td', null, i);
+      }
+      return h('tr', null, h('td', null, k), cell('code', '납품처 코드'), cell('name', '납품처명'), cell('manager', '담당자'));
+    });
+    // 고정값 표: 자동으로 채우지 않는 열
+    var fixedCols = tpl.headers.filter(function (x) { return x && !U.fieldOf(x); });
+    var fixedRows = fixedCols.map(function (col) {
+      var i = h('input', { type: 'text', value: o.fixed[col] == null ? '' : o.fixed[col], 'aria-label': col + ' 고정값', onchange: function () {
+        var f = Object.assign({}, st.uploadOpts.fixed); if (i.value.trim()) f[col] = i.value.trim(); else delete f[col]; setUp('fixed', f);
+      } });
+      return h('tr', null, h('td', null, col), h('td', null, i));
+    });
+    var preview = U.build(mi.rows, tpl, o, { today: L.todayIso(), base: st.intake.base });
+    return h('div', { class: 'card', id: 'upload-template' }, h('h2', null, '5. ERP 업로드 양식'),
+      h('p', { class: 'note' }, '「업로드 양식으로 내보내기」는 양식의 열 순서 그대로 시트「' + tpl.sheet + '」를 씁니다. ' + (st.uploadTpl ? '넣은 양식: ' + st.uploadTpl.fileName + '.' : '지금은 내장 기본 양식(웹자료올리기 17열 머리행)입니다. 회사 양식 파일을 넣으면 그 열 순서를 따릅니다.')),
+      h('div', { class: 'form-grid' },
+        h('label', { class: 'field' }, h('span', null, '업로드 양식 파일(선택)'), tin, h('small', null, '머리행만 읽습니다. 시트「웹자료올리기」가 있으면 그 시트, 없으면 첫 시트.')),
+        sel('dateMode', [['today', '오늘(올리는 날)'], ['order', '발주일(없으면 오늘)'], ['base', '취합 기준일']], '「일자」 열', '확인 부탁: 전표 일자를 무엇으로 할지'),
+        sel('dateFormat', [['dash', '2026-09-30'], ['compact', '20260930']], '날짜 쓰는 모양'),
+        sel('seqMode', [['row', '행마다 1, 2, 3…'], ['party', '같은 일자·납품처는 같은 순번(한 전표)']], '「순번」 열', '확인 부탁: 같은 순번이 한 전표로 묶이는지'),
+        sel('topItem', [['blank', '비움'], ['same', '품목코드(천일품번)와 같게']], '「품목코드(상단)」 열'),
+        sel('nameMode', [['order', '수주 파일의 품명'], ['blank', '비움(ERP 가 품목코드로 채움)']], '「품목명」 열'),
+        sel('unmapped', [['skip', '빼고 내보냄'], ['keep', '고객사 품번 그대로 내보냄']], '매핑 없는 품번', '틀린 품목코드가 ERP 에 올라가지 않도록 기본은 뺍니다'),
+        h('label', { class: 'field' }, h('span', null, '기본 담당자'), mgr, h('small', null, '납품처 표에 담당자가 없을 때 씁니다'))),
+      h('h3', { style: 'margin-top:16px' }, '납품처 설정표 (고객사 · 공장 · 구분 → 납품처 코드·납품처명·담당자)'),
+      keys.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'list' }, h('thead', null, h('tr', null, ['통합 수주의 고객사 · 공장 · 구분', '납품처 코드', '납품처명', '담당자'].map(function (x) { return h('th', null, x); }))), h('tbody', null, partyRows)))
+        : h('p', { class: 'note' }, '통합 수주가 없습니다.'),
+      h('h3', { style: 'margin-top:16px' }, '고정값 (자동으로 채우지 않는 열 — 비우면 빈칸)'),
+      fixedRows.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'list' }, h('thead', null, h('tr', null, h('th', null, '열'), h('th', null, '모든 행에 넣을 값'))), h('tbody', null, fixedRows))) : null,
+      h('details', { style: 'margin-top:12px' }, h('summary', null, '열마다 무엇으로 채우는지 (' + tpl.headers.length + '열)'),
+        h('div', { class: 'table-wrap' }, h('table', { class: 'list' }, h('thead', null, h('tr', null, h('th', null, '순서'), h('th', null, '열'), h('th', null, '채우는 값'))),
+          h('tbody', null, tpl.headers.map(function (col, i) { var f = U.fieldOf(col); return h('tr', null, h('td', { class: 'num' }, String(i + 1)), h('td', null, col), h('td', { class: 'note' }, f ? U.FIELD_LABEL[f] : (o.fixed[col] ? '고정값 「' + o.fixed[col] + '」' : '빈칸'))); }))))),
+      h('p', { class: 'note', style: 'margin-top:8px' }, '지금 설정으로 ' + n(preview.count) + '행' + (preview.skipped.unmapped ? ' (매핑 없는 ' + n(preview.skipped.unmapped) + '행 뺌)' : '') + '. 모든 행이 빈 열: ' + (preview.blankCols.length ? preview.blankCols.join(', ') : '없음') + '.'),
+      h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn btn-primary', onclick: exportUpload, disabled: preview.count ? null : true }, '업로드 양식으로 내보내기'),
+        st.uploadTpl ? h('button', { type: 'button', class: 'btn', onclick: function () { st.uploadTpl = null; save(); render(); toast('내장 기본 양식으로 되돌렸습니다'); } }, '내장 기본 양식으로') : null));
   }
 
   // ── 라우터 ──────────────────────────────────────────
