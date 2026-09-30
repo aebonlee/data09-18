@@ -219,7 +219,15 @@ begin
     $q$insert into public.part_mapping (map_group, customer_pn, company_pn) values ('doosan', 'X', '  ')$q$,
     '23514', '천일품번이 빈 매핑 줄은 받지 않는다');
   insert into public.upload_setting default values;
-  perform public._assert_eq((select unmapped from public.upload_setting), 'skip', '업로드 기본값: 매핑 없는 품번은 빼고 내보낸다');
+  perform public._assert_eq((select unmapped from public.upload_setting), 'keep', '업로드 기본값(확정): 매핑 없는 품번은 고객사 원품번 그대로');
+  perform public._assert_eq((select date_format from public.upload_setting), 'compact', '업로드 기본값(확정): 날짜는 20260930 모양');
+  perform public._assert_eq((select top_item from public.upload_setting), 'same', '업로드 기본값(확정): 품목코드(상단) = 품목코드');
+  perform public._assert_eq((select item_parties from public.upload_setting), '{}'::jsonb, '품번별 납품처는 빈 객체로 시작한다');
+  update public.upload_setting set item_parties = '{"CH-E305": {"code": "D-200", "manager": "담당자B"}}';
+  perform public._assert_raises($q$update public.upload_setting set item_parties = '[]'$q$, '23514', '품번별 납품처는 객체여야 한다');
+  update public.part_mapping set chosen = true where customer_pn = 'SMP-B705' and company_pn = 'CH-B705-A';
+  perform public._assert_raises($q$update public.part_mapping set chosen = true where customer_pn = 'SMP-B705' and company_pn = 'CH-B705'$q$,
+    '23505', '충돌에서 고른 값은 고객사 품번마다 하나만');
   perform public._assert_eq((select template_sheet from public.upload_setting), '웹자료올리기', '업로드 기본 시트 이름은 「웹자료올리기」다');
   perform public._assert_raises($q$update public.upload_setting set seq_mode = 'item'$q$, '23514', '순번 방식은 row/party 만 받는다');
   perform public._assert_raises($q$update public.upload_setting set parties = '[]'$q$, '23514', '납품처 설정표는 객체여야 한다');
@@ -228,7 +236,7 @@ begin
     '23514', '통합 수주의 매핑 상태는 정해진 값만 받는다');
 end $t$;
 
-do $t$ begin raise notice '[프로젝트] 발주단가 (기획서 11.11)'; end $t$;
+do $t$ begin raise notice '[프로젝트] 판매단가(고객 발주)·매입단가(생산처 발주) (기획서 11.11 · 11.12)'; end $t$;
 do $t$
 declare v_b bigint := current_setting('test.a_batch')::bigint;
 begin
@@ -255,17 +263,41 @@ begin
     '23514', '단가 없이 금액만 있을 수 없다');
   perform public._assert_raises(format(
     $q$insert into public.intake_order_line (batch_id, kind, item, qty, due_date, source_file, source_row, unit_price, amount, price_source) values (%s, '엔진', 'X', 2, '2026-10-01', 'f', '85', 100, 200, '추정')$q$, v_b),
-    '23514', '단가 출처는 원본·원본(같은 품번)·직접입력·단가표만 받는다');
-  insert into public.price_master (price_kind, customer, item, unit_price, source_file, source_row) values
-    ('table', '', 'SMP-G201', 3000, '단가표_예시.xlsx', 4),
-    ('table', '고객사E_발주서', 'SMP-P841', 4400, '단가표_예시.xlsx', 6),
-    ('manual', '', 'SMP-G201', 3300, '', null);   -- 같은 품번이라도 단가표·직접입력은 따로
+    '23514', '판매단가 출처는 원본·원본(같은 품번)만 받는다');
+  perform public._assert_raises(format(
+    $q$insert into public.intake_order_line (batch_id, kind, item, qty, due_date, source_file, source_row, unit_price, amount, price_source) values (%s, '엔진', 'X', 2, '2026-10-01', 'f', '86', 100, 200, '단가표')$q$, v_b),
+    '23514', '단가표 값은 판매단가가 아니다(매입단가 칸으로)');
+  -- 매입단가(생산처 발주)
+  insert into public.intake_order_line (batch_id, kind, item, qty, due_date, source_file, source_row, unit_price, amount, price_source, buy_price, buy_amount, buy_source, maker)
+    values (v_b, 'CKD', 'CH-K601', 500, '2026-10-14', '2026.09.29_납품예정CKD건기.xlsx', '9', 1200, 600000, '원본', 800, 400000, '단가표', '생산처B(가상)'),
+           (v_b, '건기', 'SMP-G202', 1, '2026-10-02', '2026.09.29_납품예정 군산건기(예정신고전).xlsx', '9', null, null, '', 3300, 3300, '직접입력', '');
+  perform public._assert_eq((select count(*)::int from public.intake_order_line where batch_id = v_b and buy_price is not null), 2,
+    '매입단가는 판매단가와 따로 적는다(판매단가 없는 줄에도)');
+  perform public._assert_raises(format(
+    $q$insert into public.intake_order_line (batch_id, kind, item, qty, due_date, source_file, source_row, buy_price, buy_amount, buy_source) values (%s, '엔진', 'X', 2, '2026-10-01', 'f', '91', 100, 300, '단가표')$q$, v_b),
+    '23514', '매입금액은 수량 × 매입단가여야 한다');
+  perform public._assert_raises(format(
+    $q$insert into public.intake_order_line (batch_id, kind, item, qty, due_date, source_file, source_row, buy_price, buy_amount, buy_source) values (%s, '엔진', 'X', 2, '2026-10-01', 'f', '92', 100, 200, '원본')$q$, v_b),
+    '23514', '매입단가 출처는 단가표·직접입력만 받는다');
+  perform public._assert_raises(format(
+    $q$insert into public.intake_order_line (batch_id, kind, item, qty, due_date, source_file, source_row, buy_price) values (%s, '엔진', 'X', 2, '2026-10-01', 'f', '93', 100)$q$, v_b),
+    '23514', '매입단가가 있으면 출처가 있어야 한다');
+  perform public._assert_raises(format(
+    $q$insert into public.intake_order_line (batch_id, kind, item, qty, due_date, source_file, source_row, buy_price, buy_source) values (%s, '엔진', 'X', 2, '2026-10-01', 'f', '94', 0, '단가표')$q$, v_b),
+    '23514', '매입단가 0 은 받지 않는다');
+  -- 매입단가표 (당사 품목코드 → 매입단가 · 생산처)
+  insert into public.price_master (price_kind, item, maker, unit_price, source_file, source_row) values
+    ('table', 'SMP-G201', '생산처C(가상)', 2100, '매입단가표_예시.xlsx', 8),
+    ('table', 'CH-K601', '생산처B(가상)', 800, '매입단가표_예시.xlsx', 9),
+    ('manual', 'SMP-G201', '', 2200, '', null);   -- 같은 품목이라도 단가표·직접입력은 따로
   perform public._assert_raises($q$insert into public.price_master (item, unit_price) values ('SMP-G201', 3100)$q$,
-    '23505', '단가표에 같은 고객사·같은 품번은 한 줄만');
-  insert into public.price_master (item, unit_price, source_row) values ('SMP-G201', 3100, 9)
-    on conflict (owner_id, price_kind, customer, item) do update set unit_price = excluded.unit_price;
-  perform public._assert_eq((select unit_price from public.price_master where price_kind = 'table' and item = 'SMP-G201'), 3100::numeric,
-    'upsert(onConflict owner_id,price_kind,customer,item)로 단가를 바꾼다');
+    '23505', '매입단가표에 같은 품목코드는 한 줄만');
+  insert into public.price_master (item, maker, unit_price, source_row) values ('SMP-G201', '생산처A(가상)', 2150, 9)
+    on conflict (owner_id, price_kind, item) do update set unit_price = excluded.unit_price, maker = excluded.maker;
+  perform public._assert_eq((select unit_price from public.price_master where price_kind = 'table' and item = 'SMP-G201'), 2150::numeric,
+    'upsert(onConflict owner_id,price_kind,item)로 매입단가·생산처를 바꾼다');
+  perform public._assert_eq((select count(*)::int from information_schema.columns where table_schema = 'public' and table_name = 'price_master' and column_name = 'customer'), 0,
+    '매입단가표에는 고객사 칸이 없다(고객 발주 단가와 무관)');
   perform public._assert_raises($q$insert into public.price_master (item, unit_price) values ('X', -1)$q$, '23514', '단가는 양수만');
   perform public._assert_raises($q$insert into public.price_master (price_kind, item, unit_price) values ('guess', 'X', 1)$q$, '23514', '단가 종류는 table/manual 만');
   perform public._assert_raises($q$update public.upload_setting set price_col = 'end'$q$, '23514', '단가 열 설정은 add/none 만');
@@ -327,9 +359,9 @@ begin
   perform public._assert(public.is_member() and not public.is_admin(), 'C 는 구성원이지만 admin 이 아니다');
   perform public._assert_rows('select 1 from public.order_line', 2, 'C 는 A 의 수주 행을 본다(팀 공유)');
   perform public._assert_rows('select 1 from public.shipment_plan_log', 1, 'C 는 A 가 확정한 선적계획 기록을 본다');
-  perform public._assert_rows('select 1 from public.intake_order_line', 8, 'C 는 A 의 통합 수주 표를 본다(팀 공유)');
-  perform public._assert_rows('select 1 from public.price_master', 3, 'C 는 A 의 단가표를 본다(팀 공유)');
-  perform public._assert_rows('update public.price_master set unit_price = 1', 0, 'C 는 A 의 단가표를 고칠 수 없다(0행)');
+  perform public._assert_rows('select 1 from public.intake_order_line', 10, 'C 는 A 의 통합 수주 표를 본다(팀 공유)');
+  perform public._assert_rows('select 1 from public.price_master', 3, 'C 는 A 의 매입단가표를 본다(팀 공유)');
+  perform public._assert_rows('update public.price_master set unit_price = 1', 0, 'C 는 A 의 매입단가표를 고칠 수 없다(0행)');
   perform public._assert_rows('update public.intake_order_line set qty = 1', 0, 'C 는 A 의 통합 수주 표를 고칠 수 없다(0행)');
   perform public._assert_rows('select 1 from public.app_members', 1, 'C 는 구성원 명단 중 자기 행만 본다');
   perform public._assert_rows('update public.order_line set qty = 0',

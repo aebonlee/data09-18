@@ -7,7 +7,7 @@
   var KEYS = ['orders', 'stock', 'shipments'];
   var st = S.load();
   var partMap = S.loadMapping(); // 고객사 품번 → 천일품번 매핑표(이 브라우저에만 저장, 기획서 11.10)
-  var priceTable = S.loadPriceTable(); // 단가표 품목코드 → 단가(이 브라우저에만 저장, 기획서 11.11)
+  var priceTable = S.loadPriceTable(); // 매입단가표 당사 품목코드 → 매입단가·생산처(이 브라우저에만 저장, 기획서 11.12)
   var pendingSheets = { orders: null, stock: null, shipments: null }; // 방금 연 파일의 시트들(시트 바꾸기용, 저장 안 함)
   var main = document.getElementById('main');
 
@@ -670,19 +670,19 @@
   function mappedIntake() {
     if (!st.intake) return null;
     var mi = M.apply(st.intake.rows, partMap, st.mapOpts);
-    // 발주단가(기획서 11.11): 원본 → 원본(같은 품번) → 직접입력 → 단가표. 단가표·직접입력을 바꾸면 바로 반영
-    mi.price = Pr.apply(mi.rows, priceTable, st.manualPrices);
+    // 판매단가(고객 발주, 참고)는 원본 그대로, 매입단가(생산처 발주, 기획서 11.12)는 매입단가표 → 직접입력. 바꾸면 바로 반영
+    mi.price = Pr.apply(mi.rows, priceTable, st.manualBuy);
     mi.rows = mi.price.rows;
     return mi;
   }
   function readPriceFile(file) {
     readFile(file, function (err, book) {
-      if (err) { toast('단가표를 읽지 못했습니다: ' + (err.message || err), true); return; }
+      if (err) { toast('매입단가표를 읽지 못했습니다: ' + (err.message || err), true); return; }
       var p = Pr.parseBook(book);
-      if (!p.stats.pairs) { toast(p.problems[0] || '단가표에서 읽은 단가가 없습니다', true); return; }
+      if (!p.stats.pairs) { toast(p.problems[0] || '매입단가표에서 읽은 단가가 없습니다', true); return; }
       priceTable = Object.assign(p, { file: file.name, at: new Date().toISOString() });
       S.savePriceTable(priceTable); render();
-      toast('단가표를 읽었습니다 — 품번 ' + n(p.stats.pairs) + '개' + (p.stats.conflicts ? ' · 단가 충돌 ' + p.stats.conflicts + '건(위쪽 값)' : ''));
+      toast('매입단가표를 읽었습니다 — 품목 ' + n(p.stats.pairs) + '개' + (p.stats.makers ? ' · 생산처 ' + p.stats.makers + '곳' : '') + (p.stats.conflicts ? ' · 단가 충돌 ' + p.stats.conflicts + '건(위쪽 값)' : ''));
     });
   }
   function readMappingFile(file) {
@@ -713,7 +713,7 @@
     if (!out.count) { toast('내보낼 행이 없습니다(매핑 없는 ' + out.skipped.unmapped + '행은 설정대로 뺐습니다)', true); return; }
     var sheets = {}; sheets[out.sheet] = out.aoa;
     writeXlsx(sheets, '업로드양식_' + st.intake.base + (st.intake.sample ? '_예시데이터' : '') + '.xlsx');
-    toast('업로드 양식 ' + out.count + '행을 내보냈습니다' + (out.skipped.unmapped ? ' · 매핑 없는 ' + out.skipped.unmapped + '행은 뺐습니다' : '') + (out.noPrice ? ' · 단가 없음 ' + out.noPrice + '행은 단가 빈칸' : ''));
+    toast('업로드 양식 ' + out.count + '행을 내보냈습니다' + (out.skipped.unmapped ? ' · 매핑 없는 ' + out.skipped.unmapped + '행은 뺐습니다' : '') + (out.noPrice ? ' · 매입단가 없음 ' + out.noPrice + '행은 단가 빈칸' : '') + (out.noParty ? ' · 납품처 코드 없음 ' + out.noParty + '행' : ''));
   }
   function sendIntakeToPlan() {
     var r = st.intake;
@@ -789,7 +789,7 @@
         sel('shortMode', [['increment', '날짜별로 늘어난 만큼 한 줄씩'], ['single', '가장 큰 결품을 첫 결품일 한 줄로']], '누적결품 → 수주 줄 만들기', '누적값이라 날짜별 증가분이 그날의 결품입니다'),
         sel('monthBuckets', [[true, '넣음(그 달 첫날로)'], [false, '넣지 않음(일별 칸만)']], '누적결품의 월 단위 칸(11·12·01월…)'),
         sel('poAllSheets', [[false, '최근 시트만(발주일자가 가장 늦은 시트)'], [true, '모든 시트']], '발주서 파일에 시트가 여럿일 때', '2026-09-30 확정: 괄호 힌트 없는 발주서는 최근 시트만'),
-        sel('borrowPrice', [[true, '같은 품번의 다른 파일 단가로 채움'], [false, '채우지 않음(단가 없음)']], '단가 칸이 없는 줄(누적결품 등)의 발주단가', '같은 고객사·같은 품번 단가가 한 가지일 때만 채웁니다. 두 가지 이상이면 비우고 알립니다'),
+        sel('borrowPrice', [[true, '같은 품번의 다른 파일 단가로 채움'], [false, '채우지 않음(판매단가 없음)']], '단가 칸이 없는 줄(누적결품 등)의 판매단가(고객 발주, 참고)', '같은 고객사·같은 품번 단가가 한 가지일 때만 채웁니다. 매입단가(생산처 발주)와는 무관합니다'),
         textIn('portalCustomer', '포털 파일 고객사 이름', '건기·엔진·AM·CKD 파일에는 고객사 이름이 없어 여기 적은 이름을 씁니다'),
         textIn('bobcatCustomer', '밥캣 파일 고객사 이름'))));
 
@@ -810,22 +810,24 @@
       h('div', { class: 'kpi' + (mi.stats.unmapped ? ' alert-kpi' : '') }, h('div', { class: 'k' }, '천일품번 매핑'),
         h('div', { class: 'v' }, mi.stats.loaded ? n(mi.stats.mapped + mi.stats.conflict) + '행' : '매핑표 없음'),
         h('div', { class: 's' }, mi.stats.loaded ? '매핑 없음 ' + n(mi.stats.unmappedItems) + '품번(' + n(mi.stats.unmapped) + '행) · 대상 아님 ' + n(mi.stats.none) + '행' : '위 3번에 매핑표를 넣어 주세요')),
-      h('button', { type: 'button', class: 'kpi kpi-btn' + (mi.price.stats.none ? ' alert-kpi' : ''), onclick: function () { var el = document.getElementById('intake-price'); if (el) el.scrollIntoView({ behavior: 'smooth' }); } },
-        h('div', { class: 'k' }, '발주단가'), h('div', { class: 'v' }, n(mi.price.stats.has) + '행'),
-        h('div', { class: 's' }, mi.price.stats.none ? '단가 없음 ' + n(mi.price.stats.none) + '행(' + n(mi.price.stats.noneItems) + '품번)' : '모든 줄에 단가가 있습니다')),
+      h('button', { type: 'button', class: 'kpi kpi-btn' + (mi.price.stats.buyNone ? ' alert-kpi' : ''), onclick: function () { var el = document.getElementById('intake-price'); if (el) el.scrollIntoView({ behavior: 'smooth' }); } },
+        h('div', { class: 'k' }, '매입단가(생산처 발주)'), h('div', { class: 'v' }, n(mi.price.stats.buyHas) + '행'),
+        h('div', { class: 's' }, (mi.price.stats.buyNone ? '매입단가 없음 ' + n(mi.price.stats.buyNone) + '행(' + n(mi.price.stats.buyNoneItems) + '품목)' : '모든 줄에 매입단가가 있습니다') + ' · 판매단가(참고) ' + n(mi.price.stats.saleHas) + '행')),
       h('button', { type: 'button', class: 'kpi kpi-btn' + (sum.checks ? ' alert-kpi' : ''), onclick: function () { var el = document.getElementById('intake-checks'); if (el) el.scrollIntoView({ behavior: 'smooth' }); } }, h('div', { class: 'k' }, '★확인 필요'), h('div', { class: 'v' }, n(sum.checks) + '건'), h('div', { class: 's' }, sum.checks ? '아래 목록을 확인해 주세요' : '없습니다'))));
 
     main.appendChild(h('div', { class: 'card' }, h('h2', null, '4. 결과 쓰기'),
       h('div', { class: 'btn-row' },
         h('button', { type: 'button', class: 'btn btn-primary', onclick: sendIntakeToPlan, disabled: r.rows.length ? null : true }, '이 수주로 선적계획 계산'),
         h('button', { type: 'button', class: 'btn', onclick: function () {
-          var sheets = I.exportSheets({ rows: mi.rows, files: r.files, checks: allChecks, stock: intakeSide.stock, shipments: intakeSide.shipments });
-          sheets['단가없음'] = Pr.missingAoa(mi.price.missing);
+          var sheets = I.exportSheets({ rows: mi.rows, files: r.files, checks: allChecks, stock: intakeSide.stock, shipments: intakeSide.shipments }, { margin: st.showMargin });
+          sheets['매입단가없음'] = Pr.missingAoa(mi.price.missing);
+          var cl = M.conflictList(partMap, st.intake.rows);
+          if (cl.length) sheets['매핑충돌'] = M.conflictAoa(cl);
           writeXlsx(sheets, '수주취합_' + r.base + (r.sample ? '_예시데이터' : '') + '.xlsx');
         } }, '통합 수주 Excel 내려받기'),
         h('button', { type: 'button', class: 'btn', onclick: exportUpload, disabled: r.rows.length ? null : true }, '업로드 양식으로 내보내기')),
       h('p', { class: 'note', style: 'margin-top:8px' }, '「이 수주로 선적계획 계산」은 통합 수주를 ' + (mi.stats.loaded ? '천일품번으로 바꿔 ' : '') + '입력 ① 수주현황으로, 선적계획 파일(' + (r.shipCount || 0) + '행)은 입력 ③ 선적예정으로, 창고별재고현황(' + (r.stockCount || 0) + '행)은 입력 ② 재고현황으로 넘기고 기준일을 맞춘 뒤 대시보드로 갑니다. 넣지 않은 자료는 지금 들어 있는 것을 그대로 둡니다.'),
-      h('p', { class: 'note' }, 'Excel 시트: 통합수주(발주단가·금액·단가 출처 포함) · 파일별집계 · ★확인필요 · 수주현황(이 도구 표준 열) · 단가없음' + (intakeSide.stock ? ' · 재고현황' : '') + (intakeSide.shipments ? ' · 선적예정' : '') + '. 「업로드 양식으로 내보내기」는 아래 5번 설정대로 시트「' + uploadTemplate().sheet + '」 ' + uploadTemplate().headers.length + '열을 씁니다.')));
+      h('p', { class: 'note' }, 'Excel 시트: 통합수주(판매단가(고객 발주) · 매입단가(생산처 발주) · 생산처' + (st.showMargin ? ' · 판매−매입' : '') + ' 포함) · 파일별집계 · ★확인필요 · 수주현황(이 도구 표준 열) · 매입단가없음' + (M.has(partMap) && M.conflictList(partMap).length ? ' · 매핑충돌' : '') + (intakeSide.stock ? ' · 재고현황' : '') + (intakeSide.shipments ? ' · 선적예정' : '') + '. 「업로드 양식으로 내보내기」는 아래 5번 설정대로 시트「' + uploadTemplate().sheet + '」 ' + uploadTemplate().headers.length + '열을 씁니다.')));
 
     // ★확인 필요 — 매핑 없음
     if (mi.stats.loaded) main.appendChild(h('div', { class: 'card', id: 'intake-unmapped' }, h('h2', null, '★확인 필요 — 매핑 없음 ' + unmappedChecks.length + '건'),
@@ -841,11 +843,11 @@
     var pbs = mi.price.stats.bySource;
     main.appendChild(h('div', { class: 'card' }, h('h2', null, '파일별 결과 ' + r.files.length + '개'),
       h('div', { class: 'table-wrap' }, h('table', { class: 'list' },
-        h('thead', null, h('tr', null, ['원본파일', '판별', '고객사 · 공장 · 구분', '읽은 행', '수집', '단가 있음 / 없음', '규칙으로 뺀 행(사유)', '메모'].map(function (x, i) { return h('th', { class: i >= 3 && i <= 5 ? 'num' : null }, x); }))),
+        h('thead', null, h('tr', null, ['원본파일', '판별', '고객사 · 공장 · 구분', '읽은 행', '수집', '판매단가 있음 / 없음', '규칙으로 뺀 행(사유)', '메모'].map(function (x, i) { return h('th', { class: i >= 3 && i <= 5 ? 'num' : null }, x); }))),
         h('tbody', null, r.files.map(function (f) {
           return h('tr', null, h('td', null, f.file), h('td', null, f.typeLabel), h('td', null, [f.customer, f.plant, f.group].filter(Boolean).join(' · ')),
             h('td', { class: 'num' }, n(f.read)), h('td', { class: 'num' }, n(f.collected)),
-            h('td', { class: 'num nowrap' }, pbs[f.file] ? n(pbs[f.file].has) + ' / ' + n(pbs[f.file].none) : '-'),
+            h('td', { class: 'num nowrap' }, pbs[f.file] ? n(pbs[f.file].sale) + ' / ' + n(pbs[f.file].saleNone) : '-'),
             h('td', null, Object.keys(f.excluded).map(function (k) { return h('span', { class: 'tag' }, k + ' ' + f.excluded[k]); })),
             h('td', { class: 'note' }, f.notes.join(' / ')));
         }))))));
@@ -872,22 +874,26 @@
         return (!intakeFilter.group || x.group === intakeFilter.group) && (!intakeFilter.q || (x.item + ' ' + x.company + ' ' + x.customer + ' ' + x.source + ' ' + (x.name || '')).toLowerCase().indexOf(intakeFilter.q) >= 0);
       });
       holder.textContent = '';
-      holder.appendChild(h('div', { class: 'list-meta' }, h('span', null, rows.length + '행 · 수량 ' + n(rows.reduce(function (s, x) { return s + x.qty; }, 0)) + ' · 금액(단가 있는 줄) ' + n(Math.round(rows.reduce(function (s, x) { return s + (x.amount || 0); }, 0)))), rows.length > LIMIT ? h('span', { class: 'note' }, '화면에는 앞 ' + LIMIT + '행만 보입니다 — 전체는 Excel 로 내려받아 주세요') : null));
+      holder.appendChild(h('div', { class: 'list-meta' }, h('span', null, rows.length + '행 · 수량 ' + n(rows.reduce(function (s, x) { return s + x.qty; }, 0)) + ' · 매입금액(매입단가 있는 줄) ' + n(Math.round(rows.reduce(function (s, x) { return s + (x.buyAmount || 0); }, 0)))), rows.length > LIMIT ? h('span', { class: 'note' }, '화면에는 앞 ' + LIMIT + '행만 보입니다 — 전체는 Excel 로 내려받아 주세요') : null));
       if (!rows.length) { holder.appendChild(h('p', { class: 'empty' }, '조건에 맞는 행이 없습니다.')); return; }
       holder.appendChild(h('div', { class: 'table-wrap' }, h('table', { class: 'list' },
-        h('thead', null, h('tr', null, ['고객사', '공장', '구분', '품목코드', '천일품번', '수량', '발주단가', '금액', '납기일', '발주일', '원본파일 / 행', '비고'].map(function (x) { return h('th', { class: x === '수량' || x === '발주단가' || x === '금액' ? 'num' : null }, x); }))),
+        h('thead', null, h('tr', null, ['고객사', '공장', '구분', '품목코드', '천일품번', '수량', '판매단가(고객 발주)', '매입단가(생산처 발주)', '생산처', '매입금액'].concat(st.showMargin ? ['판매−매입'] : [], ['납기일', '발주일', '원본파일 / 행', '비고']).map(function (x) { return h('th', { class: /수량|단가|금액|판매−매입/.test(x) ? 'num' : null }, x); }))),
         h('tbody', null, rows.slice(0, LIMIT).map(function (x) {
           return h('tr', null, h('td', null, x.customer), h('td', null, x.plant), h('td', null, x.group), h('td', { class: 'nowrap' }, x.item),
-            h('td', { class: 'nowrap' }, h('strong', null, x.company), x.mapStatus === 'unmapped' || x.mapStatus === 'conflict' ? h('span', { class: 'tag warn' }, M.STATUS_LABEL[x.mapStatus]) : null),
+            h('td', { class: 'nowrap' }, h('strong', null, x.company), x.mapStatus === 'unmapped' || x.mapStatus === 'conflict' ? h('span', { class: 'tag warn' }, M.STATUS_LABEL[x.mapStatus]) : x.mapChosen ? h('span', { class: 'tag' }, '충돌에서 고름') : null),
             h('td', { class: 'num' }, n(x.qty)),
-            h('td', { class: 'num nowrap' }, x.price == null ? h('span', { class: 'tag warn' }, '단가 없음') : [n(x.price), x.priceSrc && x.priceSrc !== '원본' ? h('span', { class: 'tag' }, x.priceSrc) : null]),
-            h('td', { class: 'num' }, x.amount == null ? '' : n(x.amount)), h('td', { class: 'nowrap' }, L.fmtDate(x.due)), h('td', { class: 'nowrap' }, x.orderDate || ''),
+            h('td', { class: 'num nowrap note' }, x.price == null ? '' : [n(x.price), x.priceSrc && x.priceSrc !== '원본' ? h('span', { class: 'tag' }, x.priceSrc) : null]),
+            h('td', { class: 'num nowrap' }, x.buyPrice == null ? h('span', { class: 'tag warn' }, '매입단가 없음') : [n(x.buyPrice), x.buySrc === '직접입력' ? h('span', { class: 'tag' }, '직접입력') : null]),
+            h('td', null, x.maker || ''),
+            h('td', { class: 'num' }, x.buyAmount == null ? '' : n(x.buyAmount)),
+            st.showMargin ? h('td', { class: 'num nowrap' }, x.margin == null ? '' : x.margin < 0 ? h('span', { class: 'tag warn' }, n(x.margin)) : n(x.margin)) : null,
+            h('td', { class: 'nowrap' }, L.fmtDate(x.due)), h('td', { class: 'nowrap' }, x.orderDate || ''),
             h('td', null, x.source + (x.sheet && x.sheet !== 'sheet1' && x.sheet !== 'Sheet1' ? ' · ' + x.sheet : '') + ' · ' + x.row), h('td', { class: 'note' }, [x.rule, x.note, x.priceNote].filter(Boolean).join(' · ')));
         })))));
     }
     gsel.addEventListener('change', draw); q.addEventListener('input', draw);
     main.appendChild(h('div', { class: 'card' }, h('h2', null, '통합 수주 표'),
-      h('p', { class: 'note' }, '품목코드는 고객사 품번(파일 그대로), 천일품번은 매핑표로 바꾼 당사 품번입니다. 재고·선적계획은 천일품번으로 맞춥니다. 납기일 순입니다.'),
+      h('p', { class: 'note' }, '품목코드는 고객사 품번(파일 그대로), 천일품번은 매핑표로 바꾼 당사 품번입니다. 재고·선적계획은 천일품번으로 맞춥니다. 판매단가(고객 발주)는 고객 파일의 단가로 참고용이고, 매입단가(생산처 발주)는 매입단가표에서 찾은 값입니다. 납기일 순입니다.'),
       h('div', { class: 'form-grid' }, h('label', { class: 'field' }, h('span', null, '구분'), gsel), h('label', { class: 'field' }, h('span', null, '검색'), q)), holder));
     draw();
     main.appendChild(uploadCard(mi));
@@ -909,12 +915,26 @@
             h('td', { class: 'num' }, n(x.dupSame)), h('td', { class: 'num' }, n(x.blank)), h('td', { class: 'num' }, n(x.same)),
             h('td', { class: 'num' }, x.conflicts ? h('span', { class: 'tag warn' }, n(x.conflicts) + '건') : '0'));
         })))));
-      var confl = [];
-      M.GROUP_KEYS.forEach(function (g) { var G = partMap.groups[g]; if (G) Object.keys(G.conflicts).forEach(function (k) { confl.push({ g: g, k: k, v: G.conflicts[k] }); }); });
-      if (confl.length) body.push(h('div', { class: 'alert warn', style: 'margin-top:12px' },
-        h('strong', null, '매핑 충돌 경고 — 같은 고객사 품번이 서로 다른 천일품번으로 적혀 있습니다. 위쪽 행 값으로 계산합니다.'),
-        h('ul', null, confl.slice(0, 50).map(function (c) { return h('li', null, M.GROUPS[c.g].label + ' 「' + c.k + '」 → ' + c.v.join(' / ')); })),
-        confl.length > 50 ? h('p', { class: 'note' }, '외 ' + (confl.length - 50) + '건') : null));
+      // 매핑 충돌: 정확한 고객사 품번과 천일품번 후보(매핑표 행 번호)를 보여 주고, 쓸 값을 고르게 합니다(2026-09-30 질문 「어떤 품번인지」)
+      var confl = M.conflictList(partMap, st.intake ? st.intake.rows : null);
+      if (confl.length) body.push(h('div', { class: 'alert warn', style: 'margin-top:12px', id: 'map-conflicts' },
+        h('strong', null, '매핑 충돌 ' + confl.length + '건 — 같은 고객사 품번이 서로 다른 천일품번으로 적혀 있습니다.'),
+        h('p', { class: 'note' }, '고르지 않으면 매핑표 위쪽 행 값으로 계산합니다. 맞는 값을 고르면 그 값으로 계산하고 「매핑 충돌」 표시가 없어집니다(이 브라우저에 기억, 매핑표를 다시 넣어도 같은 충돌이면 유지). 매핑표 자체를 고치는 것이 가장 확실합니다 — 행 번호를 참고해 주세요.'),
+        h('div', { class: 'table-wrap' }, h('table', { class: 'list' },
+          h('thead', null, h('tr', null, ['묶음', '고객사 품번', '천일품번 후보 (매핑표 시트 · 행)', '이번 수주', '쓸 천일품번'].map(function (x) { return h('th', null, x); }))),
+          h('tbody', null, confl.slice(0, 100).map(function (c) {
+            var s2 = h('select', { 'aria-label': c.item + ' 쓸 천일품번', onchange: function () { partMap = M.choose(partMap, c.group, c.item, s2.value); S.saveMapping(partMap); render(); toast(s2.value ? '「' + c.item + '」 → 「' + s2.value + '」로 계산합니다' : '위쪽 행 값으로 되돌렸습니다'); } },
+              h('option', { value: '' }, '위쪽 행 값(' + c.values[0].value + ')'), c.values.map(function (v) { return h('option', { value: v.value }, v.value); }));
+            s2.value = c.chosen || '';
+            return h('tr', null, h('td', null, c.label), h('td', { class: 'nowrap' }, h('strong', null, c.item)),
+              h('td', null, h('ul', { class: 'plain' }, c.values.map(function (v) { return h('li', null, h('strong', null, v.value), v.rows.length ? ' — ' + (v.sheet ? v.sheet + ' ' : '') + v.rows.join('·') + '행' : ''); }))),
+              h('td', { class: 'nowrap' }, c.orders.rows ? n(c.orders.rows) + '행 · 수량 ' + n(c.orders.qty) : '없음'),
+              h('td', null, s2));
+          })))),
+        confl.length > 100 ? h('p', { class: 'note' }, '외 ' + (confl.length - 100) + '건 — 전체는 「충돌 목록 내려받기」로') : null,
+        h('div', { class: 'btn-row', style: 'margin-top:8px' }, h('button', { type: 'button', class: 'btn', onclick: function () {
+          writeXlsx({ '매핑충돌': M.conflictAoa(M.conflictList(partMap, st.intake ? st.intake.rows : null)) }, '매핑충돌_' + L.todayIso() + '.xlsx');
+        } }, '충돌 목록 내려받기(Excel)'))));
       (partMap.problems || []).forEach(function (p) { body.push(h('div', { class: 'alert info', style: 'margin-top:8px' }, p)); });
     }
     var um = h('select', { 'aria-label': '매핑 없는 품번', onchange: function () { st.mapOpts = { unmapped: um.value }; save(); render(); } },
@@ -936,49 +956,74 @@
       } }, '매핑표 지우기')) : null);
   }
 
-  // 발주단가 카드 (기획서 11.11): 출처별 개수 · 단가표 · 단가 없음 목록(직접입력)
+  // 매입단가 카드 (기획서 11.12): 매입단가(생산처 발주) = 매입단가표 → 직접입력, 판매단가(고객 발주)는 참고
   function priceCard(mi) {
     var ps = mi.price.stats, miss = mi.price.missing, LIM = 200;
-    var input = h('input', { type: 'file', accept: '.xlsx,.xls,.xlsm,.csv', 'aria-label': '단가표 파일' });
+    var input = h('input', { type: 'file', accept: '.xlsx,.xls,.xlsm,.csv', 'aria-label': '매입단가표 파일' });
     input.addEventListener('change', function () { if (input.files[0]) readPriceFile(input.files[0]); });
     function setManual(k, v) {
-      var m = Object.assign({}, st.manualPrices), x = Pr.num(v);
+      var m = Object.assign({}, st.manualBuy), x = Pr.num(v);
       if (x && x > 0) m[k] = x; else delete m[k];
-      st.manualPrices = m; save(); render();
+      st.manualBuy = m; save(); render();
     }
-    var srcText = Pr.SRC_ORDER.map(function (k) { return k + ' ' + n(ps.bySrc[k] || 0); }).join(' · ');
-    var tableInfo = Pr.has(priceTable)
-      ? h('p', { class: 'note' }, '넣은 단가표: ' + (priceTable.file || '') + ' — 품번 ' + n(priceTable.stats.pairs) + '개' + (priceTable.stats.blank ? ' · 빈 칸 ' + n(priceTable.stats.blank) + '행' : '') + (priceTable.stats.bad ? ' · 숫자가 아닌 단가 ' + n(priceTable.stats.bad) + '행' : '') + (priceTable.stats.conflicts ? ' · 단가 충돌 ' + n(priceTable.stats.conflicts) + '건(위쪽 값)' : '') + (ps.tableDiff ? ' · 원본 단가와 다른 품번 ' + n(ps.tableDiff) + '개(원본을 씀)' : ''))
-      : h('p', { class: 'note' }, '단가표가 없습니다. 원본에 단가가 없는 줄은 비워 둡니다.');
-    return h('div', { class: 'card', id: 'intake-price' }, h('h2', null, '발주단가 — 단가 없음 ' + n(ps.none) + '행 (' + n(ps.noneItems) + '품번)'),
-      h('p', { class: 'note' }, '단가는 원본 파일의 단가 칸(포털·밥캣 「발주단가」, 발주서 「단가」「발주단가」, PDF 「단가」)을 먼저 쓰고, 단가 칸이 없는 줄은 같은 품번의 다른 파일 단가 → 아래에 직접 적은 값 → 단가표 순서로 채웁니다. 금액 = 수량 × 단가. 단가표·직접 적은 값은 이 브라우저에만 저장합니다.'),
-      h('p', null, h('strong', null, '단가 출처: '), srcText + ' · 단가 없음 ' + n(ps.none) + ' · 금액 합계 ' + n(Math.round(ps.amount))),
+    var t = priceTable;
+    var tableInfo = Pr.has(t)
+      ? h('p', { class: 'note' }, '넣은 매입단가표: ' + (t.file || '') + ' — 품목 ' + n(t.stats.pairs) + '개' + (t.stats.makers ? ' · 생산처 ' + n(t.stats.makers) + '곳' : '') + (t.stats.blank ? ' · 빈 칸 ' + n(t.stats.blank) + '행' : '') + (t.stats.bad ? ' · 숫자가 아닌 단가 ' + n(t.stats.bad) + '행' : '') + (t.stats.conflicts ? ' · 같은 품목에 단가·생산처가 둘 이상 ' + n(t.stats.conflicts) + '건(위쪽 행 값)' : '') + (ps.manualShadowed ? ' · 직접 적은 값 중 ' + n(ps.manualShadowed) + '개는 이제 단가표 값을 씀' : ''))
+      : h('p', { class: 'note' }, '매입단가표가 없습니다. 품목별 단가표 파일을 넣거나 아래 목록에 직접 적어 주세요.');
+    var conflictBox = null;
+    if (Pr.has(t) && t.stats.conflicts) {
+      var ck = Object.keys(t.conflicts).sort();
+      conflictBox = h('details', { style: 'margin-top:8px' }, h('summary', null, '매입단가표에서 같은 품목코드가 다른 값으로 적힌 ' + ck.length + '건'),
+        h('ul', { class: 'note' }, ck.slice(0, 50).map(function (k) { return h('li', null, k + ' — ' + t.conflicts[k].map(function (x) { return n(x.price) + (x.maker ? '(' + x.maker + ')' : '') + ' ' + x.row + '행'; }).join(' / ')); })));
+    }
+    var mg = h('input', { type: 'checkbox', checked: !!st.showMargin, onchange: function () { st.showMargin = mg.checked; save(); render(); } });
+    var saleText = Pr.SALE_ORDER.map(function (k) { return k + ' ' + n(ps.saleBySrc[k] || 0); }).join(' · ');
+    return h('div', { class: 'card', id: 'intake-price' }, h('h2', null, '매입단가(생산처 발주) — 없음 ' + n(ps.buyNone) + '행 (' + n(ps.buyNoneItems) + '품목)'),
+      h('p', { class: 'note' }, '매입단가는 당사가 생산처에 발주하는 단가로, 고객사 발주 단가와 무관합니다. 품목별 매입단가표(당사 품목코드 → 매입단가, 생산처 선택)에서 찾고, 표에 없는 품목은 아래 목록에 직접 적습니다. 업로드 양식의 「단가」 열에 이 값을 씁니다. 매입단가표·직접 적은 값은 이 브라우저에만 저장합니다.'),
+      h('p', null, h('strong', null, '매입단가: '), '단가표 ' + n(ps.buyBySrc['단가표'] || 0) + ' · 직접입력 ' + n(ps.buyBySrc['직접입력'] || 0) + ' · 없음 ' + n(ps.buyNone) + ' · 매입금액 합계 ' + n(Math.round(ps.buyAmount))),
+      h('p', { class: 'note' }, h('strong', null, '판매단가(고객 발주, 참고): '), saleText + ' · 없음 ' + n(ps.saleNone) + ' · 판매금액 합계 ' + n(Math.round(ps.saleAmount)) + ' — 고객사 파일의 단가 칸 그대로입니다.'),
       h('div', { class: 'form-grid' },
-        h('label', { class: 'field' }, h('span', null, Pr.has(priceTable) ? '단가표 다시 넣기' : '단가표 넣기(선택)'), input,
-          h('small', null, '열: 품목코드(품번·천일품번·자재코드) | 단가(발주단가). 「고객사」 열이 있으면 그 고객사 줄에만 씁니다. 고객사 품번·천일품번 어느 쪽으로 적어도 찾습니다.'),
-          Pr.has(priceTable) ? null : h('button', { type: 'button', class: 'btn', style: 'margin-top:6px', onclick: function () {
-            priceTable = Object.assign(Pr.parseBook(ISample.priceBook()), { file: '예시 단가표(가상 품번·가상 단가)', at: new Date().toISOString() });
-            S.savePriceTable(priceTable); render(); toast('예시 단가표를 넣었습니다 — 실제 단가표를 넣으면 바뀝니다');
-          } }, '예시 단가표로 해 보기'))),
-      tableInfo,
-      Pr.has(priceTable) ? h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn btn-danger', onclick: function () {
-        if (!window.confirm('이 브라우저에 저장된 단가표를 지웁니다. 계속할까요?')) return;
-        S.clearPriceTable(); priceTable = null; render(); toast('단가표를 지웠습니다');
-      } }, '단가표 지우기')) : null,
+        h('label', { class: 'field' }, h('span', null, Pr.has(t) ? '매입단가표 다시 넣기' : '매입단가표 넣기'), input,
+          h('small', null, '열: 품목코드(천일품번·당사품번·품번) | 매입단가(구매단가·발주단가·단가) | 생산처(선택). 「판매단가」 열은 읽지 않습니다. 천일품번으로 찾고, 없으면 고객사 원품번으로 찾습니다.'),
+          Pr.has(t) ? null : h('button', { type: 'button', class: 'btn', style: 'margin-top:6px', onclick: function () {
+            priceTable = Object.assign(Pr.parseBook(ISample.priceBook()), { file: '예시 매입단가표(가상 품번·가상 단가)', at: new Date().toISOString() });
+            S.savePriceTable(priceTable); render(); toast('예시 매입단가표를 넣었습니다 — 실제 단가표를 넣으면 바뀝니다');
+          } }, '예시 매입단가표로 해 보기')),
+        h('label', { class: 'check field' }, mg, h('span', null, '판매 − 매입 차이 보기'), h('small', null, '통합 수주 표와 Excel 에 「판매−매입」 열을 붙입니다(둘 다 있는 줄만).'))),
+      tableInfo, conflictBox,
+      st.showMargin ? h('p', { class: ps.negative ? 'alert warn' : 'note' }, '판매 − 매입: 두 단가가 모두 있는 ' + n(ps.both) + '행, 차이 금액 합계 ' + n(Math.round(ps.marginAmount)) + (ps.negative ? ' · 매입단가가 판매단가보다 높은 줄 ' + n(ps.negative) + '행(' + n(ps.negativeItems) + '품목) — 표에 빨간 표시' : '')) : null,
+      Pr.has(t) ? h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn btn-danger', onclick: function () {
+        if (!window.confirm('이 브라우저에 저장된 매입단가표를 지웁니다. 계속할까요?')) return;
+        S.clearPriceTable(); priceTable = null; render(); toast('매입단가표를 지웠습니다');
+      } }, '매입단가표 지우기')) : null,
       miss.length ? h('div', { class: 'table-wrap', style: 'margin-top:12px' }, h('table', { class: 'list' },
-        h('thead', null, h('tr', null, ['고객사', '고객사 품번', '천일품번', '행 수', '수량', '원본파일', '단가 직접입력'].map(function (x, i) { return h('th', { class: i === 3 || i === 4 ? 'num' : null }, x); }))),
+        h('thead', null, h('tr', null, ['품목코드', '고객사 품번', '고객사 · 구분', '행 수', '수량', '매입단가 직접입력'].map(function (x, i) { return h('th', { class: i === 3 || i === 4 ? 'num' : null }, x); }))),
         h('tbody', null, miss.slice(0, LIM).map(function (m) {
-          var inp = h('input', { type: 'text', inputmode: 'decimal', value: st.manualPrices[m.key] == null ? '' : String(st.manualPrices[m.key]), 'aria-label': m.item + ' 단가', style: 'max-width:120px', onchange: function () { setManual(m.key, inp.value); } });
-          return h('tr', null, h('td', null, m.customer), h('td', { class: 'nowrap' }, h('strong', null, m.item)), h('td', { class: 'nowrap' }, m.company !== m.item ? m.company : ''),
-            h('td', { class: 'num' }, n(m.rows)), h('td', { class: 'num' }, n(m.qty)), h('td', { class: 'note' }, m.files.join(', ') + (m.note ? ' · ' + m.note : '')), h('td', null, inp));
+          var inp = h('input', { type: 'text', inputmode: 'decimal', value: st.manualBuy[m.key] == null ? '' : String(st.manualBuy[m.key]), 'aria-label': m.item + ' 매입단가', style: 'max-width:120px', onchange: function () { setManual(m.key, inp.value); } });
+          return h('tr', null, h('td', { class: 'nowrap' }, h('strong', null, m.item)), h('td', { class: 'nowrap' }, m.customerItem !== m.item ? m.customerItem : ''),
+            h('td', null, m.customers.join(', ') + (m.group ? ' · ' + m.group : '')), h('td', { class: 'num' }, n(m.rows)), h('td', { class: 'num' }, n(m.qty)), h('td', null, inp));
         }))))
-        : h('p', { class: 'note' }, '모든 줄에 단가가 있습니다.'),
-      miss.length > LIM ? h('p', { class: 'note' }, '화면에는 수량이 큰 ' + LIM + '품번만 보입니다 — 전체는 Excel 의 「단가없음」 시트로 확인해 주세요') : null,
-      ps.manualCount ? h('div', { class: 'btn-row', style: 'margin-top:8px' }, h('button', { type: 'button', class: 'btn', onclick: function () {
-        if (!window.confirm('직접 적은 단가 ' + ps.manualCount + '개를 지웁니다. 계속할까요?')) return;
-        st.manualPrices = {}; save(); render();
-      } }, '직접 적은 단가 지우기(' + ps.manualCount + '개)')) : null);
+        : h('p', { class: 'note' }, '모든 줄에 매입단가가 있습니다.'),
+      miss.length > LIM ? h('p', { class: 'note' }, '화면에는 수량이 큰 ' + LIM + '품목만 보입니다 — 전체는 Excel 의 「매입단가없음」 시트로 확인해 주세요') : null,
+      h('div', { class: 'btn-row', style: 'margin-top:8px' },
+        miss.length ? h('button', { type: 'button', class: 'btn', onclick: function () { writeXlsx({ '매입단가표': Pr.templateAoa(miss) }, '매입단가표_채우기_' + L.todayIso() + '.xlsx'); } }, '매입단가 없는 품목을 단가표 양식으로 내려받기') : null,
+        ps.manualCount ? h('button', { type: 'button', class: 'btn', onclick: function () {
+          if (!window.confirm('직접 적은 매입단가 ' + ps.manualCount + '개를 지웁니다. 계속할까요?')) return;
+          st.manualBuy = {}; save(); render();
+        } }, '직접 적은 매입단가 지우기(' + ps.manualCount + '개)') : null));
   }
+
+  // 품번별 납품처표 파일 읽기(품목코드 | 납품처 코드 | 납품처명 | 담당자) — 빈 칸은 기존 값을 지우지 않습니다
+  function readPartyFile(file) {
+    readFile(file, function (err, book) {
+      if (err) { toast('납품처표를 읽지 못했습니다: ' + (err.message || err), true); return; }
+      var p = U.parseItemParties(book);
+      if (!p.stats.set) { toast(p.problems[0] || '납품처 값이 적힌 행이 없습니다', true); return; }
+      st.uploadOpts = U.mergeOptions(Object.assign({}, st.uploadOpts, { itemParties: U.mergeItemParties(st.uploadOpts.itemParties, p.map) }));
+      save(); render(); toast('납품처표를 읽었습니다 — 품번 ' + n(p.stats.set) + '개' + (p.stats.blank ? ' · 값이 빈 ' + p.stats.blank + '행은 건너뜀' : ''));
+    });
+  }
+  var partyFilter = { onlyEmpty: false, q: '' };
 
   // 5. ERP 업로드 양식 카드
   function uploadCard(mi) {
@@ -992,7 +1037,58 @@
     var tin = h('input', { type: 'file', accept: '.xlsx,.xls,.xlsm,.csv', 'aria-label': '업로드 양식 파일' });
     tin.addEventListener('change', function () { if (tin.files[0]) readTemplateFile(tin.files[0]); });
     var mgr = h('input', { type: 'text', value: o.manager, onchange: function () { setUp('manager', mgr.value); } });
-    // 납품처 설정표: 통합 수주의 고객사 · 공장 · 구분마다 한 줄
+
+    // 품번별 납품처 (확정: 납품처 코드·납품처명·담당자는 수기입력, 품번별로 다름 — 한 번 적으면 이 브라우저에 기억)
+    var expRows = mi.rows.filter(function (r) { return !(r.mapStatus === 'unmapped' && o.unmapped === 'skip'); });
+    var items = U.itemList(expRows), ip = o.itemParties;
+    function filled(e) { var p = ip[e.key] || ip[U.key(e.customerItem)] || {}; return !!(p.code || p.name || p.manager); }
+    var emptyCount = items.filter(function (e) { return !filled(e); }).length;
+    function setItemParty(k, f, v) {
+      var add = {}; add[k] = {}; add[k][f] = v.trim();
+      st.uploadOpts = U.mergeOptions(Object.assign({}, st.uploadOpts, { itemParties: U.mergeItemParties(st.uploadOpts.itemParties, add) }));
+      save();   // 입력 중 화면을 다시 그리지 않습니다(다음 칸으로 바로 넘어가게) — 미리보기 수는 다른 설정을 바꿀 때 갱신
+    }
+    var pin = h('input', { type: 'file', accept: '.xlsx,.xls,.csv', 'aria-label': '품번별 납품처표 파일' });
+    pin.addEventListener('change', function () { if (pin.files[0]) readPartyFile(pin.files[0]); });
+    var only = h('input', { type: 'checkbox', checked: partyFilter.onlyEmpty });
+    var pq = h('input', { type: 'search', placeholder: '품목코드·고객사 검색', value: partyFilter.q, 'aria-label': '품번별 납품처 검색' });
+    var partyHolder = h('div');
+    var PLIM = 300;
+    function drawParties() {
+      partyFilter.onlyEmpty = only.checked; partyFilter.q = pq.value.trim().toLowerCase();
+      var list = items.filter(function (e) {
+        return (!partyFilter.onlyEmpty || !filled(e)) && (!partyFilter.q || (e.code + ' ' + e.customerItem + ' ' + e.customers.join(' ') + ' ' + e.groups.join(' ')).toLowerCase().indexOf(partyFilter.q) >= 0);
+      });
+      partyHolder.textContent = '';
+      if (!list.length) { partyHolder.appendChild(h('p', { class: 'note' }, partyFilter.onlyEmpty ? '납품처가 빈 품번이 없습니다.' : '조건에 맞는 품번이 없습니다.')); return; }
+      partyHolder.appendChild(h('div', { class: 'table-wrap' }, h('table', { class: 'list' },
+        h('thead', null, h('tr', null, ['품목코드', '고객사 · 구분', '행 · 수량', '납품처 코드', '납품처명', '담당자', ''].map(function (x) { return h('th', null, x); }))),
+        h('tbody', null, list.slice(0, PLIM).map(function (e, i) {
+          var p = ip[e.key] || ip[U.key(e.customerItem)] || {};
+          var inputs = {};
+          function cell(f, label) {
+            var inp = inputs[f] = h('input', { type: 'text', value: p[f] || '', 'aria-label': e.code + ' ' + label, style: 'max-width:150px', onchange: function () { setItemParty(e.key, f, inp.value); } });
+            return h('td', null, inp);
+          }
+          var prev = i > 0 ? list[i - 1] : null;
+          return h('tr', null, h('td', { class: 'nowrap' }, h('strong', null, e.code), e.customerItem !== e.code ? h('div', { class: 'note' }, '고객사 ' + e.customerItem) : null),
+            h('td', null, e.customers.join(', ') + (e.groups.length ? ' · ' + e.groups.join(', ') : '')),
+            h('td', { class: 'num nowrap' }, n(e.rows) + ' · ' + n(e.qty)),
+            cell('code', '납품처 코드'), cell('name', '납품처명'), cell('manager', '담당자'),
+            h('td', null, prev ? h('button', { type: 'button', class: 'btn btn-small', title: '바로 위 품번의 납품처 코드·납품처명·담당자를 그대로 넣습니다', onclick: function () {
+              var cur = st.uploadOpts.itemParties;   // 방금 적은 값까지(화면을 다시 그리지 않고 저장만 했으므로 ip 가 아니라 지금 값)
+              var q = cur[prev.key] || cur[U.key(prev.customerItem)] || {};
+              var add = {}; add[e.key] = { code: q.code || '', name: q.name || '', manager: q.manager || '' };
+              st.uploadOpts = U.mergeOptions(Object.assign({}, st.uploadOpts, { itemParties: U.mergeItemParties(st.uploadOpts.itemParties, add) }));
+              save(); render();
+            } }, '위와 같게') : null));
+        })))));
+      if (list.length > PLIM) partyHolder.appendChild(h('p', { class: 'note' }, '화면에는 앞 ' + PLIM + '품번만 보입니다 — 검색으로 좁히거나 Excel 로 내려받아 채운 뒤 넣어 주세요'));
+    }
+    only.addEventListener('change', drawParties); pq.addEventListener('input', drawParties);
+    drawParties();
+
+    // 묶음 기본값(선택): 통합 수주의 고객사 · 공장 · 구분마다 한 줄 — 품번별 값이 없을 때만 씁니다
     var keys = U.partyKeys(mi.rows);
     var partyRows = keys.map(function (k) {
       var p = o.parties[k] || {};
@@ -1017,25 +1113,39 @@
     var outH = preview.headers || tpl.headers;
     return h('div', { class: 'card', id: 'upload-template' }, h('h2', null, '5. ERP 업로드 양식'),
       h('p', { class: 'note' }, '「업로드 양식으로 내보내기」는 양식의 열 순서 그대로 시트「' + tpl.sheet + '」를 씁니다. ' + (st.uploadTpl ? '넣은 양식: ' + st.uploadTpl.fileName + '.' : '지금은 내장 기본 양식(웹자료올리기 17열 머리행)입니다. 회사 양식 파일을 넣으면 그 열 순서를 따릅니다.')),
+      h('div', { class: 'alert info' }, '2026-09-30 확정: 일자 = 등록일자(오늘, 20260930 모양) · 순번 = 1, 2, 3 차례로 · 품목코드(상단) = 품목코드와 같은 값 · 매핑표에 없는 품번은 고객사 원품번 그대로 · 납품처 코드·납품처명·담당자는 품번별로 직접 적음(아래 표, 한 번 적으면 기억) · 단가 = 매입단가(생산처 발주).'),
       h('div', { class: 'form-grid' },
         h('label', { class: 'field' }, h('span', null, '업로드 양식 파일(선택)'), tin, h('small', null, '머리행만 읽습니다. 시트「웹자료올리기」가 있으면 그 시트, 없으면 첫 시트.')),
-        sel('dateMode', [['today', '오늘(올리는 날)'], ['order', '발주일(없으면 오늘)'], ['base', '취합 기준일']], '「일자」 열', '확인 부탁: 전표 일자를 무엇으로 할지'),
-        sel('dateFormat', [['dash', '2026-09-30'], ['compact', '20260930']], '날짜 쓰는 모양'),
-        sel('seqMode', [['row', '행마다 1, 2, 3…'], ['party', '같은 일자·납품처는 같은 순번(한 전표)']], '「순번」 열', '확인 부탁: 같은 순번이 한 전표로 묶이는지'),
-        sel('topItem', [['blank', '비움'], ['same', '품목코드(천일품번)와 같게']], '「품목코드(상단)」 열'),
+        sel('dateMode', [['today', '오늘(등록일자)'], ['order', '발주일(없으면 오늘)'], ['base', '취합 기준일']], '「일자」 열', '확정: 등록일자 = 오늘'),
+        sel('dateFormat', [['compact', '20260930'], ['dash', '2026-09-30']], '날짜 쓰는 모양', '확정: 20260930 (납기일자도 같은 모양)'),
+        sel('seqMode', [['row', '행마다 1, 2, 3…'], ['party', '같은 일자·납품처는 같은 순번(한 전표)']], '「순번」 열', '확정: 1, 2, 3 순차'),
+        sel('topItem', [['same', '품목코드(천일품번)와 같게'], ['blank', '비움']], '「품목코드(상단)」 열', '확정: 품목코드와 같은 값'),
         sel('nameMode', [['order', '수주 파일의 품명'], ['blank', '비움(ERP 가 품목코드로 채움)']], '「품목명」 열'),
-        sel('unmapped', [['skip', '빼고 내보냄'], ['keep', '고객사 품번 그대로 내보냄']], '매핑 없는 품번', '틀린 품목코드가 ERP 에 올라가지 않도록 기본은 뺍니다'),
-        sel('priceCol', [['add', '「수량」 뒤에 「단가」 열을 더함'], ['none', '더하지 않음(양식 그대로)']], '양식에 단가 열이 없을 때', '받은 양식(17열)에는 단가 열이 없습니다. 확인 부탁: ERP 가 열이 하나 늘어도 받는지, 단가 열 이름·위치가 따로 있는지. 양식에 「단가」「금액」 열이 있으면 그 열에 채웁니다'),
-        h('label', { class: 'field' }, h('span', null, '기본 담당자'), mgr, h('small', null, '납품처 표에 담당자가 없을 때 씁니다'))),
-      h('h3', { style: 'margin-top:16px' }, '납품처 설정표 (고객사 · 공장 · 구분 → 납품처 코드·납품처명·담당자)'),
-      keys.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'list' }, h('thead', null, h('tr', null, ['통합 수주의 고객사 · 공장 · 구분', '납품처 코드', '납품처명', '담당자'].map(function (x) { return h('th', null, x); }))), h('tbody', null, partyRows)))
-        : h('p', { class: 'note' }, '통합 수주가 없습니다.'),
+        sel('unmapped', [['keep', '고객사 원품번 그대로 내보냄'], ['skip', '빼고 내보냄']], '매핑 없는 품번', '확정: 매핑표는 주기적으로 갱신 예정이라 고객사 원품번 그대로 등록'),
+        sel('priceCol', [['add', '「수량」 뒤에 「단가」(매입단가) 열을 더함'], ['none', '더하지 않음(양식 그대로)']], '양식에 단가 열이 없을 때', '단가 열에는 매입단가(생산처 발주)를 씁니다. 확인 부탁: ERP 가 열이 하나 늘어도 받는지, 단가 열 이름·위치가 정해져 있는지'),
+        h('label', { class: 'field' }, h('span', null, '기본 담당자(선택)'), mgr, h('small', null, '품번별 표·묶음 기본값에 담당자가 없을 때만 씁니다'))),
+      h('h3', { style: 'margin-top:16px' }, '품번별 납품처 (품목코드 → 납품처 코드 · 납품처명 · 담당자) — 빈 품번 ' + n(emptyCount) + ' / ' + n(items.length)),
+      h('p', { class: 'note' }, '품번마다 납품처가 달라 직접 적습니다. 한 번 적으면 이 브라우저에 기억해 다음 취합에 그대로 채웁니다(천일품번으로 기억하고, 매핑 전 고객사 품번으로 적은 값도 찾습니다). 많을 때는 Excel 로 내려받아 채운 뒤 다시 넣어 주세요 — 빈 칸은 기존 값을 지우지 않습니다.'),
+      h('div', { class: 'form-grid' },
+        h('label', { class: 'field' }, h('span', null, '품번별 납품처표 넣기(Excel·CSV)'), pin, h('small', null, '열: 품목코드 | 납품처 코드 | 납품처명 | 담당자')),
+        h('label', { class: 'field' }, h('span', null, '검색'), pq),
+        h('label', { class: 'check field' }, only, h('span', null, '납품처가 빈 품번만 보기'))),
+      h('div', { class: 'btn-row', style: 'margin:8px 0' },
+        h('button', { type: 'button', class: 'btn', onclick: function () { writeXlsx({ '품번별납품처': U.itemPartiesAoa(items, st.uploadOpts.itemParties) }, '품번별납품처_' + L.todayIso() + '.xlsx'); } }, '품번별 납품처표 내려받기(Excel)'),
+        Object.keys(ip).length ? h('button', { type: 'button', class: 'btn btn-danger', onclick: function () {
+          if (!window.confirm('기억해 둔 품번별 납품처 ' + Object.keys(ip).length + '개를 지웁니다. 계속할까요?')) return;
+          setUp('itemParties', {});
+        } }, '기억한 납품처 지우기(' + Object.keys(ip).length + '개)') : null),
+      partyHolder,
+      h('details', { style: 'margin-top:12px' }, h('summary', null, '묶음 기본값(선택) — 고객사 · 공장 · 구분마다, 품번별 값이 없을 때만'),
+        keys.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'list' }, h('thead', null, h('tr', null, ['통합 수주의 고객사 · 공장 · 구분', '납품처 코드', '납품처명', '담당자'].map(function (x) { return h('th', null, x); }))), h('tbody', null, partyRows)))
+          : h('p', { class: 'note' }, '통합 수주가 없습니다.')),
       h('h3', { style: 'margin-top:16px' }, '고정값 (자동으로 채우지 않는 열 — 비우면 빈칸)'),
       fixedRows.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'list' }, h('thead', null, h('tr', null, h('th', null, '열'), h('th', null, '모든 행에 넣을 값'))), h('tbody', null, fixedRows))) : null,
       h('details', { style: 'margin-top:12px' }, h('summary', null, '열마다 무엇으로 채우는지 (' + outH.length + '열' + (preview.added && preview.added.length ? ' — 양식 ' + tpl.headers.length + '열 + 더한 「' + preview.added.join('」「') + '」' : '') + ')'),
         h('div', { class: 'table-wrap' }, h('table', { class: 'list' }, h('thead', null, h('tr', null, h('th', null, '순서'), h('th', null, '열'), h('th', null, '채우는 값'))),
           h('tbody', null, outH.map(function (col, i) { var f = U.fieldOf(col), added = (preview.added || []).indexOf(col) >= 0 && tpl.headers.indexOf(col) < 0; return h('tr', null, h('td', { class: 'num' }, String(i + 1)), h('td', null, col, added ? h('span', { class: 'tag' }, '더한 열') : null), h('td', { class: 'note' }, f ? U.FIELD_LABEL[f] : (o.fixed[col] ? '고정값 「' + o.fixed[col] + '」' : '빈칸'))); }))))),
-      h('p', { class: 'note', style: 'margin-top:8px' }, '지금 설정으로 ' + n(preview.count) + '행' + (preview.skipped.unmapped ? ' (매핑 없는 ' + n(preview.skipped.unmapped) + '행 뺌)' : '') + (preview.noPrice ? ' · 단가 없음 ' + n(preview.noPrice) + '행은 단가 빈칸' : '') + '. 모든 행이 빈 열: ' + (preview.blankCols.length ? preview.blankCols.join(', ') : '없음') + '.'),
+      h('p', { class: 'note', style: 'margin-top:8px' }, '지금 설정으로 ' + n(preview.count) + '행' + (preview.skipped.unmapped ? ' (매핑 없는 ' + n(preview.skipped.unmapped) + '행 뺌)' : '') + (preview.noParty ? ' · 납품처 코드 없음 ' + n(preview.noParty) + '행' : '') + (preview.noPrice ? ' · 매입단가 없음 ' + n(preview.noPrice) + '행은 단가 빈칸' : '') + '. 모든 행이 빈 열: ' + (preview.blankCols.length ? preview.blankCols.join(', ') : '없음') + '.'),
       h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn btn-primary', onclick: exportUpload, disabled: preview.count ? null : true }, '업로드 양식으로 내보내기'),
         st.uploadTpl ? h('button', { type: 'button', class: 'btn', onclick: function () { st.uploadTpl = null; save(); render(); toast('내장 기본 양식으로 되돌렸습니다'); } }, '내장 기본 양식으로') : null));
   }

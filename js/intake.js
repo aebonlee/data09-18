@@ -51,7 +51,7 @@
       monthBuckets: true,        // 누적결품의 월 단위 칸(11·12·01…)도 결품으로 넣을지
       shortMode: 'increment',    // increment = 날짜별 늘어난 결품만큼 한 줄씩 | single = 최대 결품을 첫 결품일 한 줄로
       poAllSheets: false,        // 확정(2026-09-30): 발주서 파일에 시트가 여럿이면 최근(발주일자가 가장 늦은) 시트만 / 전부(true)
-      borrowPrice: true,         // 2026-09-30 요청 「발주단가」: 단가 칸이 없는 줄(누적결품 등)은 같은 고객사·같은 품번의 다른 파일 단가로 채움(값이 하나일 때만)
+      borrowPrice: true,         // 판매단가(고객 발주, 참고): 단가 칸이 없는 줄(누적결품 등)은 같은 고객사·같은 품번의 다른 파일 단가로 채움(값이 하나일 때만)
       portalCustomer: '포털 고객사', // 건기·엔진·AM·CKD 파일의 고객사 이름(파일에 이름이 없어 사용자가 적음)
       bobcatCustomer: '밥캣'
     };
@@ -724,23 +724,37 @@
   // ── 6. 내보내기·넘기기 ─────────────────────────────────
   // 품목코드 = 고객사 품번(파일 그대로), 천일품번 = 매핑표로 바꾼 당사 품번(기획서 11.10). 매핑 전 행은 천일품번 칸이 품목코드와 같습니다
   var MAP_LABEL = { mapped: '매핑됨', conflict: '매핑 충돌', unmapped: '매핑 없음', nomap: '매핑표 없음', none: '매핑 대상 아님' };
-  // 발주단가(2026-09-30 요청): 단가 = 원본 칸(가격단위로 나눔) · 같은 품번 다른 파일 · 직접입력 · 단가표, 금액 = 수량 × 단가
-  var HEAD = ['고객사', '공장', '구분', '품목코드', '천일품번', '매핑', '품명', '수량', '발주단가', '금액', '단가 출처', '납기일', '발주일', '원본파일', '원본 시트', '원본 행', '규칙', '비고'];
+  // 단가 두 가지(2026-09-30 두 번째 답변, 기획서 11.12)
+  //   판매단가(고객 발주) = 원본 칸(가격단위로 나눔) · 같은 품번 다른 파일 — 참고용. 행의 price · priceSrc
+  //   매입단가(생산처 발주) = 매입단가표 · 직접입력(price.js). 행의 buyPrice · buySrc · maker
+  var HEAD = ['고객사', '공장', '구분', '품목코드', '천일품번', '매핑', '품명', '수량',
+    '판매단가(고객 발주)', '판매금액', '판매단가 출처', '매입단가(생산처 발주)', '매입금액', '생산처', '매입단가 출처',
+    '납기일', '발주일', '원본파일', '원본 시트', '원본 행', '규칙', '비고'];
+  var MARGIN_HEAD = ['판매−매입(단가)', '판매−매입(금액)'];
   function amountOf(r) { return r.price == null ? null : Math.round(r.qty * r.price * 100) / 100; }
-  function rowsAoa(rows) {
-    return [HEAD].concat(rows.map(function (r) {
-      var a = amountOf(r);
-      return [r.customer, r.plant, r.group, r.item, r.company || r.item, MAP_LABEL[r.mapStatus] || '', r.name, r.qty, r.price == null ? '' : r.price, a == null ? '' : a, r.price == null ? '단가 없음' : (r.priceSrc || '원본'),
+  function buyAmountOf(r) { return r.buyPrice == null ? null : Math.round(r.qty * r.buyPrice * 100) / 100; }
+  function blank(v) { return v == null ? '' : v; }
+  /** opts.margin = true 면 매입단가 출처 뒤에 「판매−매입」 두 열 */
+  function rowsAoa(rows, opts) {
+    var mg = !!(opts && opts.margin), H = HEAD.slice();
+    if (mg) H.splice(H.indexOf('매입단가 출처') + 1, 0, MARGIN_HEAD[0], MARGIN_HEAD[1]);
+    return [H].concat(rows.map(function (r) {
+      var a = amountOf(r), b = buyAmountOf(r);
+      var line = [r.customer, r.plant, r.group, r.item, r.company || r.item, MAP_LABEL[r.mapStatus] || '', r.name, r.qty,
+        blank(r.price), blank(a), r.price == null ? '판매단가 없음' : (r.priceSrc || '원본'),
+        blank(r.buyPrice), blank(b), r.maker || '', r.buyPrice == null ? '매입단가 없음' : (r.buySrc || ''),
         r.due, r.orderDate || '', r.source, r.sheet || '', r.row, r.rule || '', [r.note, r.priceNote].filter(Boolean).join(' · ')];
+      if (mg) line.splice(15, 0, blank(r.margin), blank(r.marginAmount));
+      return line;
     }));
   }
   function excludedText(rep) { return Object.keys(rep.excluded).map(function (k) { return k + ' ' + rep.excluded[k]; }).join(' / '); }
   function excludedCount(rep) { return Object.keys(rep.excluded).reduce(function (s, k) { return s + rep.excluded[k]; }, 0); }
-  function exportSheets(res) {
+  function exportSheets(res, opts) {
     var s = {};
-    s['통합수주'] = rowsAoa(res.rows);
+    s['통합수주'] = rowsAoa(res.rows, opts);
     var ps = priceBySource(res.rows);
-    s['파일별집계'] = [['원본파일', '판별', '고객사', '공장', '구분', '시트', '읽은 행', '수집', '단가 있음', '단가 없음', '제외', '제외 사유', '메모']].concat(res.files.map(function (f) {
+    s['파일별집계'] = [['원본파일', '판별', '고객사', '공장', '구분', '시트', '읽은 행', '수집', '판매단가 있음', '판매단가 없음', '제외', '제외 사유', '메모']].concat(res.files.map(function (f) {
       var p = ps[f.file] || { has: 0, none: 0 };
       return [f.file, f.typeLabel, f.customer, f.plant, f.group, f.sheet, f.read, f.collected, p.has, p.none, excludedCount(f), excludedText(f), f.notes.join(' / ')];
     }));
@@ -753,12 +767,12 @@
   /** 통합 표 → 이 도구의 입력 ①「수주현황」 표준 열(자동 매핑됩니다). 품번 = 천일품번(재고·선적계획과 맞추는 값).
       고객사 품번·매핑·공장·구분·원본은 뒤에 덧붙입니다 */
   function ordersAoa(rows) {
-    return [['품번', '품명', '고객사', '수주일', '납기일', '수주수량', '공장', '구분', '고객사 품목코드', '매핑', '원본파일', '원본 행', '발주단가', '금액']].concat(rows.map(function (r) {
-      var a = amountOf(r);
-      return [r.company || r.item, r.name, r.customer, r.orderDate || '', r.due, r.qty, r.plant, r.group, r.item, MAP_LABEL[r.mapStatus] || '', r.source, r.row, r.price == null ? '' : r.price, a == null ? '' : a];
+    return [['품번', '품명', '고객사', '수주일', '납기일', '수주수량', '공장', '구분', '고객사 품목코드', '매핑', '원본파일', '원본 행', '판매단가(고객 발주)', '판매금액', '매입단가(생산처 발주)', '매입금액']].concat(rows.map(function (r) {
+      var a = amountOf(r), b = buyAmountOf(r);
+      return [r.company || r.item, r.name, r.customer, r.orderDate || '', r.due, r.qty, r.plant, r.group, r.item, MAP_LABEL[r.mapStatus] || '', r.source, r.row, blank(r.price), blank(a), blank(r.buyPrice), blank(b)];
     }));
   }
-  /** 원본파일마다 단가 있는 줄·없는 줄 */
+  /** 원본파일마다 판매단가(고객 발주 단가 칸) 있는 줄·없는 줄 */
   function priceBySource(rows) {
     var o = {};
     rows.forEach(function (r) { var x = o[r.source] || (o[r.source] = { has: 0, none: 0 }); if (r.price == null) x.none++; else x.has++; });
@@ -776,7 +790,7 @@
     defaultOptions: defaultOptions, mergeOptions: mergeOptions, upgradeOptions: upgradeOptions, classify: classify, fileDate: fileDate, customerFromName: customerFromName,
     TYPE_LABEL: TYPE_LABEL, LAYOUTS: LAYOUTS, PO_LIST: PO_LIST,
     shortageSteps: shortageSteps, shortDateCols: shortDateCols, clampDue: clampDue, detectPo: detectPo, parsePdfOrder: parsePdfOrder,
-    process: process, rowsAoa: rowsAoa, amountOf: amountOf, priceBySource: priceBySource, ordersAoa: ordersAoa, exportSheets: exportSheets, summary: summary, excludedText: excludedText, excludedCount: excludedCount,
+    process: process, rowsAoa: rowsAoa, amountOf: amountOf, buyAmountOf: buyAmountOf, HEAD: HEAD, MARGIN_HEAD: MARGIN_HEAD, priceBySource: priceBySource, ordersAoa: ordersAoa, exportSheets: exportSheets, summary: summary, excludedText: excludedText, excludedCount: excludedCount,
     fixZip: fixZip, num: num, colName: colName, isFinishedCode: isFinishedCode, RULES_VERSION: RULES_VERSION
   };
 

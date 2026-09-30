@@ -477,17 +477,27 @@ test('내장 양식 = 수강생 양식 머리행 17열 순서 그대로, 시트 
   assert.deepEqual(out.aoa[0], ['일자', '순번', '추가문자형식1', '납품처 코드', '납품처명', '담당자', '납기일자', '품목코드(상단)', '작업지시No.', '품목코드', '품목명', 'BOM버전', '규격', '수량', '창고', '적요', '하위반제품수']);
   assert.deepEqual(U.readTemplate({ names: ['웹자료올리기'], sheets: { '웹자료올리기': [IS.TEMPLATE_HEAD] } }).headers, out.aoa[0]);
 });
-test('값: 일자 = 오늘, 순번 1…N, 납기일자, 품목코드 = 천일품번, 수량 · 매핑 없는 행은 기본으로 뺌', () => {
+test('값(2026-09-30 확정): 일자 = 등록일자(오늘) 20260930, 순번 1…N, 품목코드(상단) = 품목코드, 매핑 없는 품번은 고객사 원품번 그대로', () => {
   const out = U.build(MI.rows, null, {}, { today: TODAY, base: RS.base });
-  assert.equal(out.count, MI.rows.length - MI.stats.unmapped); assert.equal(out.skipped.unmapped, MI.stats.unmapped);
+  assert.equal(out.count, MI.rows.length); assert.equal(out.skipped.unmapped, 0);
   const H = out.aoa[0], col = (n) => H.indexOf(n), body = out.aoa.slice(1);
-  assert.ok(body.every((r, i) => r[col('일자')] === TODAY && r[col('순번')] === i + 1));
+  assert.ok(body.every((r, i) => r[col('일자')] === '20260930' && r[col('순번')] === i + 1));
+  assert.ok(body.every((r) => r[col('품목코드(상단)')] === r[col('품목코드')] && r[col('품목코드')] !== ''));
   const c103 = body.find((r) => r[col('품목코드')] === 'SMP-C103-완제품');
   const src = rowOf('SMP-C103');
-  assert.equal(c103[col('수량')], src.qty); assert.equal(c103[col('납기일자')], src.due);
-  assert.ok(!body.some((r) => r[col('품목코드')] === 'SMP-A502'));
-  assert.equal(c103[col('납품처 코드')], ''); assert.equal(c103[col('작업지시No.')], ''); // 채울 수 없는 열은 빈칸
-  assert.equal(U.build(MI.rows, null, { unmapped: 'keep' }, { today: TODAY }).count, MI.rows.length);
+  assert.equal(c103[col('수량')], src.qty); assert.equal(c103[col('납기일자')], src.due.replace(/-/g, ''));
+  assert.ok(body.some((r) => r[col('품목코드')] === 'SMP-A502'));                  // 매핑 없음 → 고객사 원품번
+  assert.equal(c103[col('납품처 코드')], ''); assert.equal(c103[col('작업지시No.')], ''); // 수기입력 전·채울 수 없는 열은 빈칸
+  assert.equal(out.noParty, out.count);
+  assert.equal(U.build(MI.rows, null, { unmapped: 'skip' }, { today: TODAY }).count, MI.rows.length - MI.stats.unmapped);
+});
+test('저장된 옛 설정(판 1)은 확정값으로 올리고 납품처·고정값은 그대로 · 판 2 설정은 사용자가 바꾼 값을 유지', () => {
+  const old = U.upgradeOptions({ dateFormat: 'dash', topItem: 'blank', unmapped: 'skip', seqMode: 'party', parties: { a: { code: 'P1' } }, fixed: { '창고': 'W1' } });
+  assert.deepEqual([old.v, old.dateMode, old.dateFormat, old.seqMode, old.topItem, old.unmapped], [2, 'today', 'compact', 'row', 'same', 'keep']);
+  assert.deepEqual([old.parties.a.code, old.fixed['창고']], ['P1', 'W1']);
+  const cur = U.upgradeOptions({ v: 2, dateFormat: 'dash' });
+  assert.equal(cur.dateFormat, 'dash');
+  assert.deepEqual(U.upgradeOptions(null).itemParties, {});
 });
 test('사용자 양식이면 그 열 순서를 따름 · 납품처표·고정값·일자(발주일)·순번(납품처별)·날짜 모양 설정', () => {
   const tpl = U.readTemplate({ names: ['기타', '웹자료올리기'], sheets: { '기타': [['x']], '웹자료올리기': [['안내문'], ['수량', '품목코드', '창고', '일자', '순번', '납품처 코드', '없는열']] } });
@@ -510,7 +520,55 @@ test('사용자 양식이면 그 열 순서를 따름 · 납품처표·고정값
   assert.equal(new Set(body.map((r) => r[4])).size, Object.keys(seqByKey).length); // 전표마다 다른 순번
 });
 
-console.log('발주단가 (2026-09-30 요청 「발주단가도 기재가 필요하다」, 기획서 11.11)');
+test('품번별 납품처(수기입력·기억): 천일품번 → 고객사 품번 순으로 찾고, 칸이 비면 묶음 기본값 → 기본 담당자', () => {
+  const pp = U.parseItemParties(IS.partiesBook());
+  assert.deepEqual(pp.stats, { rows: 5, set: 5, blank: 0 });
+  const ip = U.mergeItemParties(pp.map, { 'SMP-B705': { code: 'B-99' } });   // 매핑 전 고객사 품번으로 적은 값
+  const a502 = rowOf('SMP-A502'), gk = U.partyKey(a502);
+  const o = U.mergeOptions({ itemParties: ip, parties: { [gk]: { code: 'G-1', manager: '묶음담당' } }, manager: '기본담당' });
+  assert.deepEqual(U.partyOf(rowOf('SMP-E305'), o), { code: 'D-200', name: '예시 납품처 군산', manager: '담당자B' });   // 천일품번 CH-E305
+  assert.deepEqual(U.partyOf(rowOf('SMP-B705'), o), { code: 'B-99', name: '', manager: '기본담당' });                  // 고객사 품번으로 찾음
+  assert.deepEqual(U.partyOf(a502, o), { code: 'D-300', name: '예시 납품처 안산', manager: '묶음담당' });              // 칸마다 따로 채움
+  const out = U.build(MI.rows, null, o, { today: TODAY }), H = out.aoa[0], body = out.aoa.slice(1);
+  const e305 = body.filter((r) => r[H.indexOf('품목코드')] === 'CH-E305');
+  assert.ok(e305.length === 2 && e305.every((r) => r[H.indexOf('납품처 코드')] === 'D-200' && r[H.indexOf('담당자')] === '담당자B'));
+  assert.equal(out.noParty, body.filter((r) => r[H.indexOf('납품처 코드')] === '').length);
+});
+test('품번별 납품처표 Excel 왕복: 내려받은 표를 다시 읽으면 같은 값 · 빈 칸은 기존 값을 지우지 않음 · 목록은 품목코드마다 한 줄', () => {
+  const items = U.itemList(MI.rows);
+  assert.equal(items.length, new Set(MI.rows.map((r) => r.company)).size);
+  assert.equal(items.find((e) => e.code === 'CH-E305').rows, 2);
+  const ip = U.parseItemParties(IS.partiesBook()).map;
+  const aoa = U.itemPartiesAoa(items, Object.assign({}, ip, { 'OLD-1': { code: 'Z' } }));
+  assert.deepEqual(aoa[0], U.PARTY_HEAD);
+  assert.equal(aoa.length, items.length + 2);                                    // 이번 수주에 없는 기억 값도 함께
+  const back = U.parseItemParties({ names: ['s'], sheets: { s: aoa } });
+  assert.deepEqual(back.map, Object.assign({}, ip, { 'OLD-1': { code: 'Z' } }));
+  const kept = U.mergeItemParties(ip, U.parseItemParties({ names: ['s'], sheets: { s: [['품목코드', '납품처 코드', '담당자'], ['CH-E305', '', '새담당']] } }).map);
+  assert.deepEqual(kept['CH-E305'], { code: 'D-200', name: '예시 납품처 군산', manager: '새담당' });
+  assert.match(U.parseItemParties({ names: ['s'], sheets: { s: [['품목코드', '수량'], ['a', 1]] } }).problems[0], /납품처/);
+});
+test('매핑 충돌 목록: 정확한 고객사 품번 · 천일품번 후보와 매핑표 행 번호 · 이번 수주 행 수', () => {
+  const at = MAP.groups.bobcat.conflictAt['SMP-B705'];
+  assert.deepEqual(at, [{ value: 'CH-B705', rows: [6], sheet: '밥캣품목코드' }, { value: 'CH-B705-A', rows: [9], sheet: '밥캣품목코드' }]);
+  const cl = M.conflictList(MAP, RS.rows);
+  assert.equal(cl.length, 1);
+  assert.deepEqual([cl[0].item, cl[0].used, cl[0].chosen, cl[0].orders.rows], ['SMP-B705', 'CH-B705', '', 1]);
+  assert.match(M.conflictAoa(cl)[1][2], /CH-B705 \(밥캣품목코드 6행\) \/ CH-B705-A \(밥캣품목코드 9행\)/);
+});
+test('매핑 충돌에서 값 고르기: 고른 값으로 계산(충돌 표시 없음) · 매핑표를 다시 넣어도 유지 · 후보가 아니면 버림', () => {
+  const m2 = M.choose(MAP, 'bobcat', 'smp-b705', 'CH-B705-A');
+  const r = M.apply(RS.rows, m2, {}), b = r.rows.find((x) => x.item === 'SMP-B705');
+  assert.deepEqual([b.company, b.mapStatus, b.mapChosen, r.stats.resolved, r.stats.conflict], ['CH-B705-A', 'mapped', true, 1, 0]);
+  assert.equal(r.checks.filter((c) => c.kind === 'conflict').length, 0);
+  assert.equal(M.merge(m2, M.parseBook(IS.mappingBook(), 'x'), 'x').chosen['bobcat|SMP-B705'], 'CH-B705-A');
+  const fixed = { names: ['밥캣품목코드'], sheets: { '밥캣품목코드': [['고객사', '천일품번'], ['SMP-B705', 'CH-B705']] } };
+  assert.deepEqual(M.merge(m2, M.parseBook(fixed, 'y'), 'y').chosen, {});          // 충돌이 없어지면 고른 값도 버림
+  assert.deepEqual(M.choose(MAP, 'bobcat', 'SMP-B705', 'NOT-A-CANDIDATE').chosen, {});
+  assert.equal(M.choose(m2, 'bobcat', 'SMP-B705', '').chosen['bobcat|SMP-B705'], undefined);
+});
+
+console.log('판매단가(고객 발주, 참고)·매입단가(생산처 발주) — 기획서 11.11 · 11.12');
 const P = require('../js/price.js');
 const itemRows = (res, item, re) => res.rows.filter((r) => r.item === item && (!re || re.test(r.source)));
 test('원본 단가 칸: 포털 발주단가 · AM · 밥캣(글자 「1,234,567」) · 발주서 A(글자)·B·C(가격단위로 나눔)·서식형 단가 · PDF 단가', () => {
@@ -541,59 +599,82 @@ test('누적결품 줄: 같은 고객사·같은 품번의 다른 파일 단가�
   assert.ok(itemRows(off, 'SMP-E401', /누적결품/).every((r) => r.price === null));
 });
 const PT = P.parseBook(IS.priceBook());
-test('단가표 읽기: 품목코드 | 단가 (+ 고객사 열 선택), 빈 칸은 세기만', () => {
-  assert.deepEqual(PT.stats, { rows: 7, pairs: 6, blank: 1, bad: 0, dupSame: 0, conflicts: 0 });
-  assert.equal(PT.map['SMP-G201'], 3000); assert.equal(PT.byCustomer['고객사E_발주서|SMP-P841'], 4400);
-  const c = P.parseBook({ names: ['s'], sheets: { s: [['품번', '발주단가'], ['q1', '1,000'], ['Q1', 900], ['q2', '없음']] } });
-  assert.deepEqual([c.map.Q1, c.stats.conflicts, c.stats.bad], [1000, 1, 1]);   // 위쪽 값, 충돌 1, 숫자 아님 1
-  assert.match(P.parseBook({ names: ['s'], sheets: { s: [['품번', '수량'], ['a', 1]] } }).problems[0], /단가/);
+test('매입단가표 읽기: 품목코드 | 매입단가 | 생산처, 「판매단가」 열은 읽지 않음, 같은 품목 두 값은 위쪽 값 + 충돌', () => {
+  assert.deepEqual(PT.stats, { rows: 18, pairs: 16, blank: 1, bad: 0, dupSame: 0, conflicts: 1, makers: 3 });
+  assert.deepEqual([PT.map['SMP-C101'].price, PT.map['SMP-C101'].maker], [9000, '생산처A(가상)']);   // 판매단가 12,000 이 아님
+  assert.deepEqual(PT.map['SMP-C105'], { price: 500, maker: '생산처A(가상)', row: 16, sheet: '매입단가표' });
+  assert.deepEqual(PT.conflicts['SMP-C105'].map((x) => [x.price, x.row]), [[500, 16], [520, 17]]);
+  const both = P.parseBook({ names: ['s'], sheets: { s: [['품번', '단가', '매입단가'], ['q1', 100, 70]] } });
+  assert.equal(both.map.Q1.price, 70);                                              // 「매입단가」가 「단가」보다 우선
+  assert.match(P.parseBook({ names: ['s'], sheets: { s: [['품목코드', '판매단가'], ['a', 1]] } }).problems[0], /판매단가.*매입단가/);
+  assert.match(P.parseBook({ names: ['s'], sheets: { s: [['품번', '수량'], ['a', 1]] } }).problems[0], /매입단가/);
 });
-test('단가 붙이기: 원본 → 원본(같은 품번) → 직접입력 → 단가표, 금액 = 수량 × 단가, 단가 없음은 품번마다 개수', () => {
-  const man = {}; man[P.manualKey(rowOf('SMP-G202'))] = '3,300';
+test('매입단가 붙이기: 매입단가표(천일품번 → 고객사 품번) → 직접입력, 판매단가(고객 발주)는 원본 그대로, 매입금액 = 수량 × 매입단가', () => {
+  const man = {}; man[P.buyKey(rowOf('SMP-G202'))] = '3,300'; man['SMP-C101'] = 1;   // C101 은 단가표에 있어 직접입력을 쓰지 않음
   const R = P.apply(MI.rows, PT, man), get = (item) => R.rows.filter((r) => r.item === item);
-  assert.ok(get('SMP-G201').every((r) => r.price === 3000 && r.priceSrc === '단가표'));
-  assert.ok(get('SMP-G202').every((r) => r.price === 3300 && r.priceSrc === '직접입력'));
-  assert.ok(get('SMP-E305').every((r) => r.price === 21000 && r.priceSrc === '단가표'));   // 천일품번 CH-E305 로 찾음
-  assert.ok(get('SMP-P841').every((r) => r.price === 4400));                               // 고객사E 줄
-  assert.equal(get('SMP-C101')[0].price, 12000);                                            // 원본이 단가표(12,500)보다 우선
-  assert.equal(R.stats.tableDiff, 1);
-  const b702 = get('SMP-B702')[0];
-  assert.deepEqual([b702.price, b702.amount], [7000, 7000 * b702.qty]);
-  assert.equal(get('SMP-K601')[0].amount, 500 * 1200);
-  assert.deepEqual(R.missing.map((m) => m.item).sort(), ['SMP-E301', 'SMP-P812', 'SMP-P832', 'SMP-P842']);
-  assert.equal(R.stats.none, 6); assert.equal(R.stats.noneItems, 4);   // E301 결품 3줄(단가 2가지) + 발주서 3줄
-  assert.equal(R.stats.has + R.stats.none, MI.rows.length);
-  assert.equal(R.stats.bySrc['단가표'] + R.stats.bySrc['직접입력'] + R.stats.bySrc['원본'] + R.stats.bySrc['원본(같은 품번)'], R.stats.has);
+  const k = get('SMP-K601')[0];
+  assert.deepEqual([k.price, k.buyPrice, k.buySrc, k.maker, k.buyAmount, k.saleAmount], [1200, 800, '단가표', '생산처B(가상)', 400000, 600000]);
+  assert.ok(get('SMP-E305').every((r) => r.buyPrice === 15000 && r.price === null));      // 천일품번 CH-E305 로 찾음, 판매단가 없음
+  assert.equal(get('SMP-A502')[0].buyPrice, 1800);                                        // 매핑 없음 → 고객사 원품번으로 찾음
+  assert.equal(get('SMP-C103')[0].buyPrice, 21000);                                       // 천일품번 SMP-C103-완제품
+  assert.deepEqual([get('SMP-G202')[0].buyPrice, get('SMP-G202')[0].buySrc], [3300, '직접입력']);
+  assert.deepEqual([get('SMP-C101')[0].buyPrice, get('SMP-C101')[0].price], [9000, 12000]); // 단가표가 직접입력보다 우선, 판매단가는 그대로
+  assert.equal(get('SMP-D002')[0].maker, '');
+  assert.equal(get('SMP-B705')[0].buyPrice, null);
+  assert.deepEqual([R.stats.buyHas, R.stats.buyNone, R.stats.buyNoneItems, R.stats.buyBySrc['단가표'], R.stats.buyBySrc['직접입력']], [24, 16, 16, 23, 1]);
+  assert.deepEqual([R.stats.manualCount, R.stats.manualShadowed], [2, 1]);
+  assert.equal(R.stats.saleHas + R.stats.saleNone, MI.rows.length);
+  assert.equal(R.stats.saleNone, RS.rows.filter((r) => r.price == null).length);
+  assert.equal(R.stats.buyAmount, R.rows.reduce((s, r) => s + (r.buyAmount || 0), 0));
+  assert.equal(R.missing.length, 16); assert.ok(R.missing.every((m) => m.rows >= 1 && m.item));
   const none = P.apply(MI.rows, null, {});
-  assert.equal(none.stats.none, RS.rows.filter((r) => r.price == null).length);
-  assert.equal(none.stats.bySource['2026.09.29_납품예정 군산건기(예정신고전).xlsx'].none, 4);
+  assert.equal(none.stats.buyNone, MI.rows.length);
+  assert.equal(none.stats.bySource['2026.09.29_납품예정 군산건기(예정신고전).xlsx'].saleNone, 4);
   assert.equal(P.sourceDisagreements(RS.rows), 0);
 });
-test('내보내기: 통합수주 발주단가·금액·단가 출처(없으면 「단가 없음」), 파일별집계 단가 있음/없음, 수주현황 끝에 단가·금액', () => {
-  const R = P.apply(MI.rows, null, {});
+test('판매 − 매입: 둘 다 있는 줄만 · 매입이 더 비싸면 음수로 셈', () => {
+  const R = P.apply(MI.rows, PT, {}), get = (item) => R.rows.find((r) => r.item === item);
+  assert.deepEqual([get('SMP-K601').margin, get('SMP-K601').marginAmount], [400, 200000]);
+  assert.equal(get('SMP-P801').margin, -1000);
+  assert.equal(get('SMP-G201').margin, null);                                             // 판매단가 없음
+  assert.deepEqual([R.stats.both, R.stats.negative, R.stats.negativeItems], [12, 1, 1]);
+  assert.equal(R.stats.marginAmount, R.rows.reduce((s, r) => s + (r.marginAmount || 0), 0));
+  assert.deepEqual(P.templateAoa(R.missing)[0], ['품목코드', '품목명', '생산처', '매입단가']);
+  const back = P.parseBook({ names: ['t'], sheets: { t: P.templateAoa(R.missing).map((r, i) => (i ? [r[0], r[1], '생산처Z', 100] : r)) } });
+  assert.equal(P.apply(MI.rows, back, {}).stats.buyHas, R.stats.buyNone);                  // 채운 양식을 다시 넣으면 빈 품목이 모두 찾아짐
+});
+test('내보내기: 통합수주에 판매단가(고객 발주)·매입단가(생산처 발주)·생산처·출처, 판매−매입은 켤 때만, 수주현황 끝에 두 단가', () => {
+  const R = P.apply(MI.rows, PT, {});
   const sh = I.exportSheets({ rows: R.rows, files: RS.files, checks: [] });
   const H = sh['통합수주'][0];
-  assert.deepEqual(H.slice(7, 11), ['수량', '발주단가', '금액', '단가 출처']);
+  assert.deepEqual(H.slice(7, 15), ['수량', '판매단가(고객 발주)', '판매금액', '판매단가 출처', '매입단가(생산처 발주)', '매입금액', '생산처', '매입단가 출처']);
+  assert.equal(H.indexOf('판매−매입(단가)'), -1);
   const k601 = sh['통합수주'].find((r) => r[3] === 'SMP-K601');
-  assert.deepEqual(k601.slice(7, 11), [500, 1200, 600000, '원본']);
-  assert.equal(sh['통합수주'].find((r) => r[3] === 'SMP-G201')[10], '단가 없음');
+  assert.deepEqual(k601.slice(7, 15), [500, 1200, 600000, '원본', 800, 400000, '생산처B(가상)', '단가표']);
+  const b = sh['통합수주'].find((r) => r[3] === 'SMP-B703');
+  assert.equal(b[H.indexOf('매입단가 출처')], '매입단가 없음');
+  const m = I.exportSheets({ rows: R.rows, files: RS.files, checks: [] }, { margin: true })['통합수주'];
+  assert.deepEqual(m[0].slice(15, 17), ['판매−매입(단가)', '판매−매입(금액)']);
+  assert.deepEqual(m.find((r) => r[3] === 'SMP-K601').slice(15, 17), [400, 200000]);
+  assert.equal(m[0].length, m[1].length);
   const FH = sh['파일별집계'][0], am = sh['파일별집계'].find((r) => /안산AM/.test(r[0]));
-  assert.deepEqual([am[FH.indexOf('단가 있음')], am[FH.indexOf('단가 없음')]], [2, 0]);
+  assert.deepEqual([am[FH.indexOf('판매단가 있음')], am[FH.indexOf('판매단가 없음')]], [2, 0]);
   const O = I.ordersAoa(R.rows);
-  assert.deepEqual(O[0].slice(-2), ['발주단가', '금액']);
+  assert.deepEqual(O[0].slice(-4), ['판매단가(고객 발주)', '판매금액', '매입단가(생산처 발주)', '매입금액']);
   assert.deepEqual(L.guessMapping(O[0], 'orders'), L.guessMapping(I.ordersAoa(MI.rows)[0].slice(0, 12), 'orders')); // 단가 열이 자동 매핑을 흔들지 않음
 });
-test('업로드 양식: 단가 열이 없으면 「수량」 바로 뒤에 「단가」를 더해 채우고(없으면 빈칸), 양식에 단가·금액 열이 있으면 그 열에', () => {
+test('업로드 양식의 단가 = 매입단가: 단가 열이 없으면 「수량」 뒤에 「단가」, 양식에 매입단가·금액·판매단가·생산처 열이 있으면 그 열에', () => {
   const R = P.apply(MI.rows, PT, {});
-  const out = U.build(R.rows, null, { unmapped: 'keep' }, { today: TODAY });
+  const out = U.build(R.rows, null, {}, { today: TODAY });
   const H = out.aoa[0];
   assert.equal(H.length, 18); assert.equal(H[H.indexOf('수량') + 1], '단가'); assert.deepEqual(out.added, ['단가']);
   const body = out.aoa.slice(1), k = body.find((r) => r[H.indexOf('품목코드')] === 'CH-K601');
-  assert.equal(k[H.indexOf('단가')], 1200);
-  assert.equal(body.filter((r) => r[H.indexOf('단가')] === '').length, R.stats.none); assert.equal(out.noPrice, R.stats.none);
-  const own = U.build(R.rows, { sheet: 's', headers: ['품목코드', '수량', '발주단가', '금액'] }, { unmapped: 'keep' }, { today: TODAY });
-  assert.deepEqual(own.aoa[0], ['품목코드', '수량', '발주단가', '금액']); assert.deepEqual(own.added, []);
-  assert.deepEqual(own.aoa.find((r) => r[0] === 'CH-K601'), ['CH-K601', 500, 1200, 600000]);
+  assert.equal(k[H.indexOf('단가')], 800);                                                // 판매단가 1,200 이 아님
+  assert.equal(body.filter((r) => r[H.indexOf('단가')] === '').length, R.stats.buyNone); assert.equal(out.noPrice, R.stats.buyNone);
+  const own = U.build(R.rows, { sheet: 's', headers: ['품목코드', '수량', '매입단가', '금액', '판매단가', '생산처'] }, {}, { today: TODAY });
+  assert.deepEqual(own.added, []);
+  assert.deepEqual(own.aoa.find((r) => r[0] === 'CH-K601'), ['CH-K601', 500, 800, 400000, 1200, '생산처B(가상)']);
+  assert.deepEqual(U.build(R.rows, { sheet: 's', headers: ['품목코드', '발주단가'] }, {}, { today: TODAY }).aoa.find((r) => r[0] === 'CH-K601'), ['CH-K601', 800]); // 발주단가 = 당사 → 생산처
   assert.deepEqual(U.build(R.rows, { sheet: 's', headers: ['품목코드', '규격'] }, {}, { today: TODAY }).aoa[0], ['품목코드', '규격', '단가']); // 수량 열이 없으면 맨 끝
 });
 

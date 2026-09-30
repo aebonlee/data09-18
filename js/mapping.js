@@ -48,12 +48,13 @@
     }
     return null;
   }
-  function emptyGroup() { return { map: {}, conflicts: {}, rows: 0, pairs: 0, blank: 0, dupSame: 0, same: 0, sheet: '' }; }
+  function emptyGroup() { return { map: {}, conflicts: {}, conflictAt: {}, firstRow: {}, rows: 0, pairs: 0, blank: 0, dupSame: 0, same: 0, sheet: '' }; }
 
   /* 매핑표 읽기. book = { names:[시트], sheets:{시트: aoa} }, fileName = 파일 이름(CSV 처럼 시트 이름이 없을 때 묶음 판별)
      반환 { groups: {doosan, bobcat 중 들어 있는 것}, problems: [문장] }
        group.map       — { 고객사품번(열쇠): 천일품번 } (같은 품번이 여러 번이면 위쪽 행)
        group.conflicts — { 고객사품번: [천일품번 …] } 같은 고객사 품번이 서로 다른 천일품번으로 적힌 것(경고)
+       group.conflictAt — { 고객사품번: [{ value: 천일품번, rows: [엑셀 행 번호 …], sheet }] } 충돌 값마다 매핑표의 몇 번째 행인지(화면에서 확인용)
        rows 읽은 행 · pairs 고유 품번 수 · blank 한쪽이 빈 행 · dupSame 똑같은 줄 반복 · same 두 품번이 같은 것 */
   function parseBook(book, fileName) {
     var out = { groups: {}, problems: [] };
@@ -76,10 +77,16 @@
         if (!G.sheet) G.sheet = nm; else if (G.sheet.split(', ').indexOf(nm) < 0) G.sheet += ', ' + nm;
         G.rows++;
         if (!c || !p) { G.blank++; continue; }
-        if (G.map[c] === undefined) { G.map[c] = p; G.pairs++; if (key(p) === c) G.same++; continue; }
-        if (key(G.map[c]) === key(p)) { G.dupSame++; continue; }
+        if (G.map[c] === undefined) { G.map[c] = p; G.firstRow[c] = { row: r + 1, sheet: nm }; G.pairs++; if (key(p) === c) G.same++; continue; }
+        if (key(G.map[c]) === key(p)) {
+          G.dupSame++;
+          if (G.conflictAt[c]) G.conflictAt[c][0].rows.push(r + 1);
+          continue;
+        }
         var list = G.conflicts[c] || (G.conflicts[c] = [G.map[c]]);
-        if (list.map(key).indexOf(key(p)) < 0) list.push(p);
+        var at = G.conflictAt[c] || (G.conflictAt[c] = [{ value: G.map[c], rows: [G.firstRow[c].row], sheet: G.firstRow[c].sheet }]);
+        if (list.map(key).indexOf(key(p)) < 0) { list.push(p); at.push({ value: p, rows: [r + 1], sheet: nm }); }
+        else at.filter(function (x) { return key(x.value) === key(p); })[0].rows.push(r + 1);
       }
       if (noGroupRows) out.problems.push('시트「' + nm + '」: 「구분」 칸으로 묶음을 알 수 없는 ' + noGroupRows + '행은 넣지 않았습니다');
     });
@@ -95,14 +102,53 @@
   }
   /** 저장할 모양: 새로 읽은 묶음만 바꾸고, 파일에 없던 묶음은 이전 것을 그대로 둡니다 */
   function merge(saved, parsed, fileName, at) {
-    var m = { v: 1, groups: {} };
+    var m = { v: 1, groups: {}, chosen: {} };
     if (saved && saved.groups) GROUP_KEYS.forEach(function (g) { if (saved.groups[g]) m.groups[g] = saved.groups[g]; });
     Object.keys(parsed.groups).forEach(function (g) {
       var G = parsed.groups[g];
-      m.groups[g] = { map: G.map, conflicts: G.conflicts, file: fileName || '', sheet: G.sheet, at: at || '',
+      m.groups[g] = { map: G.map, conflicts: G.conflicts, conflictAt: G.conflictAt, file: fileName || '', sheet: G.sheet, at: at || '',
         stats: { rows: G.rows, pairs: G.pairs, blank: G.blank, dupSame: G.dupSame, conflicts: Object.keys(G.conflicts).length, same: G.same, manyToOne: manyToOne(G) } };
     });
+    // 충돌에서 고른 값: 매핑표를 다시 넣어도 그 충돌이 그대로 있고 고른 값이 후보에 있으면 유지
+    var old = (saved && saved.chosen) || {};
+    Object.keys(old).forEach(function (ck) {
+      var i = ck.indexOf('|'), g = ck.slice(0, i), k = ck.slice(i + 1), G = m.groups[g];
+      if (G && G.conflicts && G.conflicts[k] && G.conflicts[k].map(key).indexOf(key(old[ck])) >= 0) m.chosen[ck] = old[ck];
+    });
     return m;
+  }
+  /** 충돌 품번에 쓸 천일품번 고르기(비우면 위쪽 행 값). 새 매핑 객체를 돌려줍니다 */
+  function choose(mapping, g, k, value) {
+    var m = Object.assign({}, mapping, { chosen: Object.assign({}, (mapping && mapping.chosen) || {}) });
+    var G = m.groups && m.groups[g], ck = g + '|' + key(k);
+    if (!value || !G || !G.conflicts[key(k)] || G.conflicts[key(k)].map(key).indexOf(key(value)) < 0) delete m.chosen[ck];
+    else m.chosen[ck] = value;
+    return m;
+  }
+  /* 매핑 충돌 목록 — 화면·Excel 로 정확한 고객사 품번과 천일품번 후보(매핑표 행 번호)를 보여 줍니다.
+     rows(선택) = 통합 수주 행: 이번 수주에 그 품번이 몇 행·수량 있는지 */
+  function conflictList(mapping, rows) {
+    var out = [], use = {};
+    (rows || []).forEach(function (r) {
+      var g = groupOfRow(r.group); if (!g) return;
+      var u = use[g + '|' + key(r.item)] || (use[g + '|' + key(r.item)] = { rows: 0, qty: 0 });
+      u.rows++; u.qty += r.qty || 0;
+    });
+    if (!has(mapping)) return out;
+    var chosen = mapping.chosen || {};
+    GROUP_KEYS.forEach(function (g) {
+      var G = mapping.groups[g]; if (!G || !G.conflicts) return;
+      Object.keys(G.conflicts).sort().forEach(function (k) {
+        var ck = g + '|' + k, at = (G.conflictAt && G.conflictAt[k]) || G.conflicts[k].map(function (v) { return { value: v, rows: [] }; });
+        out.push({ group: g, label: GROUPS[g].label, item: k, values: at, chosen: chosen[ck] || '', used: chosen[ck] || G.map[k], orders: use[ck] || { rows: 0, qty: 0 } });
+      });
+    });
+    return out;
+  }
+  function conflictAoa(list) {
+    return [['묶음', '고객사 품번', '천일품번 후보(매핑표 행)', '지금 쓰는 천일품번', '고른 값', '이번 수주 행 수', '이번 수주 수량']].concat(list.map(function (c) {
+      return [c.label, c.item, c.values.map(function (v) { return v.value + (v.rows.length ? ' (' + (v.sheet ? v.sheet + ' ' : '') + v.rows.join('·') + '행)' : ''); }).join(' / '), c.used, c.chosen ? '고름' : '위쪽 행(기본)', c.orders.rows, c.orders.qty];
+    }));
   }
   function has(mapping) { return !!(mapping && mapping.groups && GROUP_KEYS.some(function (g) { return mapping.groups[g]; })); }
 
@@ -112,8 +158,8 @@
      반환 { rows, checks(★확인 필요 — 품번마다 한 줄), stats } */
   function apply(rows, mapping, opts) {
     opts = opts || {};
-    var loaded = has(mapping);
-    var stats = { total: rows.length, mapped: 0, changed: 0, conflict: 0, unmapped: 0, unmappedItems: 0, nomap: 0, none: 0, loaded: loaded };
+    var loaded = has(mapping), chosen = (mapping && mapping.chosen) || {};
+    var stats = { total: rows.length, mapped: 0, changed: 0, conflict: 0, resolved: 0, unmapped: 0, unmappedItems: 0, nomap: 0, none: 0, loaded: loaded };
     var miss = {}, conf = {}, nomapGroups = {};
     var out = rows.map(function (r) {
       var g = groupOfRow(r.group), x = Object.assign({}, r);
@@ -130,7 +176,9 @@
         if (miss[mk].files.indexOf(r.source) < 0) miss[mk].files.push(r.source);
         return x;
       }
-      x.company = v; x.mapStatus = G.conflicts && G.conflicts[k] ? 'conflict' : 'mapped';
+      var ch = G.conflicts && G.conflicts[k] ? chosen[g + '|' + k] : null;
+      if (ch) { v = ch; x.mapChosen = true; stats.resolved++; }   // 충돌에서 사용자가 고른 값 → 매핑됨
+      x.company = v; x.mapStatus = G.conflicts && G.conflicts[k] && !ch ? 'conflict' : 'mapped';
       if (x.mapStatus === 'conflict') { stats.conflict++; conf[g + '|' + k] = { group: g, item: r.item, values: G.conflicts[k] }; }
       else stats.mapped++;
       if (key(v) !== k) stats.changed++;
@@ -161,6 +209,7 @@
   return {
     GROUPS: GROUPS, GROUP_KEYS: GROUP_KEYS, STATUS_LABEL: STATUS_LABEL,
     key: key, groupOfRow: groupOfRow, groupOfName: groupOfName, findCols: findCols,
-    parseBook: parseBook, merge: merge, has: has, apply: apply, planRows: planRows, manyToOne: manyToOne
+    parseBook: parseBook, merge: merge, has: has, apply: apply, planRows: planRows, manyToOne: manyToOne,
+    choose: choose, conflictList: conflictList, conflictAoa: conflictAoa
   };
 });

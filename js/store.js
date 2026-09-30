@@ -3,7 +3,8 @@
   'use strict';
   var KEY = 'data09-18.state';
   var MAP_KEY = 'data09-18.partMapping'; // 고객사 품번 ↔ 천일품번 매핑표(실제 회사 자료 — 이 브라우저에만, 리포에는 없음)
-  var PRICE_KEY = 'data09-18.priceTable'; // 단가표(품목코드 → 단가, 실제 회사 자료 — 이 브라우저에만)
+  var PRICE_KEY = 'data09-18.buyPriceTable'; // 매입단가표(당사 품목코드 → 매입단가 · 생산처, 실제 회사 자료 — 이 브라우저에만)
+  var OLD_PRICE_KEY = 'data09-18.priceTable'; // 2026-09-30 오전판 「단가표」(고객 발주 단가를 채우던 것) — 뜻이 바뀌어 읽지 않고 지웁니다
   var memory = {};
   var ok = true;
   function get(k) {
@@ -27,7 +28,8 @@
       mapOpts: { unmapped: 'keep' }, // 매핑 없는 품번: keep 고객사 품번 그대로 계산 | drop 선적계획에서 뺌
       uploadOpts: root.SPUpload ? root.SPUpload.defaultOptions() : {}, // ERP 업로드 양식 설정(납품처표·고정값)
       uploadTpl: null, // 사용자가 넣은 업로드 양식의 머리행 {fileName, sheet, headers} — 없으면 내장 기본 양식
-      manualPrices: {}, // 「단가 없음」 목록에 직접 적은 단가 {고객사|고객사 품번: 단가} (기획서 11.11)
+      manualBuy: {}, // 「매입단가 없음」 목록에 직접 적은 매입단가 {품목코드 열쇠: 단가} (기획서 11.12)
+      showMargin: false, // 판매 − 매입 차이 열 보기
       _sample: false
     };
   }
@@ -48,9 +50,10 @@
       if (root.SPIntake) st.intakeOpts = (root.SPIntake.upgradeOptions || root.SPIntake.mergeOptions)(p.intakeOpts);
       if (p.intake && Array.isArray(p.intake.rows)) st.intake = p.intake;
       if (p.mapOpts) st.mapOpts = { unmapped: p.mapOpts.unmapped === 'drop' ? 'drop' : 'keep' };
-      if (root.SPUpload) st.uploadOpts = root.SPUpload.mergeOptions(p.uploadOpts);
+      if (root.SPUpload) st.uploadOpts = root.SPUpload.upgradeOptions(p.uploadOpts);
       if (p.uploadTpl && Array.isArray(p.uploadTpl.headers)) st.uploadTpl = p.uploadTpl;
-      if (p.manualPrices && typeof p.manualPrices === 'object') st.manualPrices = p.manualPrices;
+      if (p.manualBuy && typeof p.manualBuy === 'object') st.manualBuy = p.manualBuy;
+      st.showMargin = !!p.showMargin;
     } catch (e) { /* 깨진 값은 무시하고 빈 상태 */ }
     return st;
   }
@@ -62,7 +65,7 @@
     loadMapping: function () { var raw = get(MAP_KEY); if (!raw) return null; try { var m = JSON.parse(raw); return m && m.groups ? m : null; } catch (e) { return null; } },
     saveMapping: function (m) { set(MAP_KEY, JSON.stringify(m)); },
     clearMapping: function () { del(MAP_KEY); },
-    loadPriceTable: function () { var raw = get(PRICE_KEY); if (!raw) return null; try { var t = JSON.parse(raw); return t && (t.map || t.byCustomer) ? t : null; } catch (e) { return null; } },
+    loadPriceTable: function () { if (get(OLD_PRICE_KEY) != null) del(OLD_PRICE_KEY); var raw = get(PRICE_KEY); if (!raw) return null; try { var t = JSON.parse(raw); return t && t.map ? t : null; } catch (e) { return null; } },
     savePriceTable: function (t) { set(PRICE_KEY, JSON.stringify(t)); },
     clearPriceTable: function () { del(PRICE_KEY); },
     available: function () { get(KEY); return ok; }

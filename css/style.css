@@ -185,3 +185,5 @@ table.list input[type="number"] { width: 100px; }
 .drop input[type=file] { max-width: 100%; margin-top: 6px; }
 .kpi-btn { text-align: left; font: inherit; color: inherit; cursor: pointer; width: 100%; }
 .kpi-btn:focus-visible { outline: 3px solid var(--primary); outline-offset: 2px; }
+ul.plain { list-style: none; margin: 0; padding: 0; }
+ul.plain li + li { margin-top: 2px; }

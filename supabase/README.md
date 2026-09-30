@@ -28,14 +28,14 @@
 | `plan_edit` | 사용자가 고친 선적계획(선적일, 수량) | `planEdits` |
 | `ai_note` | AI 분석 답변과 고객사·품명 포함 여부 | `ai` |
 | `shipment_plan_log` | 확정·공유한 선적계획 기록(품번, 필요일, 선적일, 입고일, 수량, 상태) | 없음(새로 추가, 3단계용) |
-| `intake_setting` | 수주 취합 규칙 설정(엔진 결품 납기 당김 일수, 결품·납품예정 겹침 처리, 직송 수집, 월 단위 칸, 발주서 시트, 고객사 이름, 단가 칸 없는 줄에 같은 품번 단가 쓰기) | `intakeOpts` |
+| `intake_setting` | 수주 취합 규칙 설정(엔진 결품 납기 당김 일수, 결품·납품예정 겹침 처리, 직송 수집, 월 단위 칸, 발주서 시트, 고객사 이름, 단가 칸 없는 줄에 같은 품번 판매단가 쓰기) | `intakeOpts` |
 | `intake_batch` | 파일 묶음을 한 번 취합한 결과(기준일, 그때 쓴 설정, 파일·행·★확인 건수) | `intake` 의 `base`·`options`·`sample` |
-| `intake_order_line` | 통합 수주 표 한 행(고객사, 공장, 구분, 품목코드, 천일품번·매핑 상태, 수량, 발주단가·금액·단가 출처·통화, 납기일, 원납기, 발주일, 원본파일·시트·행, 규칙, 비고) | `intake.rows` |
+| `intake_order_line` | 통합 수주 표 한 행(고객사, 공장, 구분, 품목코드, 천일품번·매핑 상태, 수량, 판매단가(고객 발주)·판매금액·출처·통화, 매입단가(생산처 발주)·매입금액·출처·생산처, 납기일, 원납기, 발주일, 원본파일·시트·행, 규칙, 비고) | `intake.rows` |
 | `intake_file` | 파일별 집계(판별 종류, 읽은 행, 수집, 규칙으로 뺀 행과 사유, 메모) | `intake.files` |
 | `intake_check` | 「★확인 필요」 한 줄(파일, 행, 내용, 자세히) | `intake.checks` |
-| `part_mapping` | 고객사 품번 → 천일품번(묶음 doosan 건기·엔진 / bobcat 밥캣). 충돌은 두 행으로 남김 | `data09-18.partMapping`(별도 키) |
-| `upload_setting` | ERP 업로드 양식 설정(양식 머리행, 일자·순번·품목코드(상단)·품목명 방식, 매핑 없는 품번, 납품처 설정표, 고정값, 단가 열 더하기) | `uploadOpts`·`uploadTpl` |
-| `price_master` | 단가표(품목코드 → 단가, 고객사는 선택)와 화면에서 직접 적은 단가(`price_kind` table / manual). 원본에 단가가 없는 통합 수주 줄을 채움 — 원본 단가가 늘 우선 | `data09-18.priceTable`(별도 키) · `manualPrices` |
+| `part_mapping` | 고객사 품번 → 천일품번(묶음 doosan 건기·엔진 / bobcat 밥캣). 충돌은 두 행으로 남기고 고른 값은 `chosen`(고객사 품번마다 하나) | `data09-18.partMapping`(별도 키) |
+| `upload_setting` | ERP 업로드 양식 설정(양식 머리행, 일자·순번·품목코드(상단)·품목명 방식, 매핑 없는 품번, 품번별 납품처 `item_parties`, 묶음 기본값, 고정값, 단가 열 더하기). 기본값은 2026-09-30 확정값(20260930 · 품목코드(상단) = 품목코드 · 원품번 그대로) | `uploadOpts`·`uploadTpl` |
+| `price_master` | **매입단가표**(당사 품목코드 → 매입단가 · 생산처)와 화면에서 직접 적은 매입단가(`price_kind` table / manual). 고객 발주 단가와 무관 — 통합 수주 줄의 `buy_price` 를 채움, 단가표가 직접입력보다 우선 | `data09-18.buyPriceTable`(별도 키) · `manualBuy` |
 
 지켜지는 규칙은 다음과 같습니다.
 
@@ -44,7 +44,7 @@
 - 입고 규칙은 요일(0=일 ~ 6=토)마다 0~60 정수 또는 비움(규칙 없음)이어야 합니다. 기본값은 원문 규칙(월~수 +2일, 목 +4일, 금 +3일)입니다.
 - 선적계획 id 는 「품번@필요일」 형식, 상태는 정상·부족·주의·과잉·긴급 다섯 가지입니다.
 - 통합 수주 줄은 수량이 0 보다 커야 하고(누적결품의 음수는 양수로 바꿔 넣습니다), 공장은 인천·군산·안산 또는 빈칸, 납기일은 반드시 있어야 합니다. 원본 한 행이 여러 줄이 될 수 있어(누적결품 날짜별 증가분, 날짜별 수량 발주서) 「원본 파일·시트·행 + 납기일」로 한 줄을 가립니다.
-- 발주단가(2026-09-30): 단가는 0 보다 커야 하고(원본의 0 은 단가 없음), 단가가 있으면 출처(원본·원본(같은 품번)·직접입력·단가표)가 반드시 있고, 금액은 round(수량 × 단가, 2) 와 같아야 합니다. 단가가 없으면 단가·금액·출처 세 칸을 모두 비웁니다. 단가표는 고객사·품번마다 한 줄(upsert `onConflict: 'owner_id,price_kind,customer,item'`).
+- 단가 두 가지(2026-09-30): 판매단가(`unit_price`, 고객 발주 — 참고)와 매입단가(`buy_price`, 당사 → 생산처 발주 — 업로드 양식 단가) 모두 0 보다 커야 하고, 단가가 있으면 출처(판매: 원본·원본(같은 품번) / 매입: 단가표·직접입력)가 반드시 있고, 금액은 round(수량 × 단가, 2) 와 같아야 합니다. 단가가 없으면 단가·금액·출처를 모두 비웁니다. 매입단가표는 품목코드마다 한 줄(upsert `onConflict: 'owner_id,price_kind,item'`). v0.6 스키마 위에 다시 적용하면 옛 `price_master` 행(고객 발주 단가)을 지우고 `customer` 칸을 뺍니다.
 - 수주 취합 자식 표(`intake_order_line`·`intake_file`·`intake_check`)는 본인의 취합(`intake_batch`)에만 붙습니다.
 - 앱에서 upsert 할 때 지정할 `onConflict` 값: 행 표 3개는 `source_file_id,row_no`, `plan_edit` 는 `owner_id,plan_id`, `column_mapping` 은 `owner_id,dataset`, `intake_order_line` 은 `batch_id,source_file,source_sheet,source_row,due_date`, `intake_file` 은 `batch_id,file_name`.
 

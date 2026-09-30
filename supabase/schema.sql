@@ -32,11 +32,12 @@
 --    intake_file        — 파일별 집계 (판별 종류·읽은 행·수집·규칙으로 뺀 행과 사유)
 --    intake_check       — 「★확인 필요」 한 줄 (판별·매핑하지 못한 파일·칸)
 --    ── 품번 매핑·ERP 업로드 (기획서 11.10, 2026-09-30 매핑표·업로드 양식 수령) ──
---    part_mapping       — 고객사 품번 → 천일품번 (묶음: doosan 건기·엔진 / bobcat 밥캣). 충돌은 두 행으로 남긴다
---    upload_setting     — ERP 업로드 양식 설정 (양식 머리행·일자·순번·납품처표·고정값·단가 열) — 사용자당 한 행
---    ── 발주단가 (기획서 11.11, 2026-09-30 요청 「발주단가도 기재가 필요하다」) ──
---    intake_order_line 의 unit_price · amount · price_source  — 통합 수주 한 행의 발주단가·금액(= 수량 × 단가)·단가 출처
---    price_master       — 단가표(품목코드 → 단가)와 화면에서 직접 적은 단가. 원본에 단가가 없는 줄을 채운다
+--    part_mapping       — 고객사 품번 → 천일품번 (묶음: doosan 건기·엔진 / bobcat 밥캣). 충돌은 두 행으로 남기고, 쓸 값은 chosen
+--    upload_setting     — ERP 업로드 양식 설정 (양식 머리행·일자·순번·품번별 납품처·묶음 기본값·고정값·단가 열) — 사용자당 한 행
+--    ── 단가 두 가지 (기획서 11.11 · 11.12, 2026-09-30 두 번째 답변으로 나눔) ──
+--    intake_order_line 의 unit_price · amount · price_source — 판매단가(고객 발주, 참고): 고객사 파일의 단가 칸 · 판매금액 · 출처
+--    intake_order_line 의 buy_price · buy_amount · buy_source · maker — 매입단가(생산처 발주): 당사 → 생산처 발주단가 · 매입금액 · 출처 · 생산처
+--    price_master       — 매입단가표(당사 품목코드 → 매입단가 · 생산처)와 화면에서 직접 적은 매입단가. 고객 발주 단가와 무관
 --
 --  접근 규칙
 --    · 자료는 올린 사람(owner_id)만 쓰고 고친다.
@@ -218,7 +219,7 @@ create table if not exists public.intake_setting (
   month_buckets        boolean not null default true,                 -- 누적결품 월 단위 칸
   short_mode           text not null default 'increment' check (short_mode in ('increment', 'single')),
   po_all_sheets        boolean not null default false,                -- 발주서 시트 전부 / 최근 시트만(확정 2026-09-30)
-  borrow_price         boolean not null default true,                 -- 단가 칸이 없는 줄에 같은 품번의 다른 파일 단가(값이 하나일 때만)
+  borrow_price         boolean not null default true,                 -- 판매단가(고객 발주, 참고): 단가 칸이 없는 줄에 같은 품번의 다른 파일 단가(값이 하나일 때만)
   portal_customer      text not null default '포털 고객사',
   bobcat_customer      text not null default '밥캣',
   created_at           timestamptz not null default now(),
@@ -282,10 +283,10 @@ do $c$ begin
       check (map_status in ('', 'mapped', 'conflict', 'unmapped', 'nomap', 'none'));
   end if;
 end $c$;
--- 2026-09-30 발주단가 (기획서 11.11). 단가가 없으면 세 칸 모두 비운다(단가 없음).
---   unit_price   — 발주단가(원본 단가 칸 ÷ 가격단위). 0·음수는 받지 않는다(원본의 0 은 단가 없음으로 읽는다)
---   amount       — 수량 × 단가(소수 둘째 자리 반올림). 단가 없이 금액만 있을 수 없다
---   price_source — 원본 · 원본(같은 품번) · 직접입력 · 단가표 — 단가가 있을 때만
+-- 판매단가(고객 발주, 참고) — 기획서 11.11. 고객사가 보낸 파일의 단가 칸이다. 단가가 없으면 세 칸 모두 비운다.
+--   unit_price   — 판매단가(원본 단가 칸 ÷ 가격단위). 0·음수는 받지 않는다(원본의 0 은 단가 없음으로 읽는다)
+--   amount       — 판매금액 = 수량 × 판매단가(소수 둘째 자리 반올림). 단가 없이 금액만 있을 수 없다
+--   price_source — 원본 · 원본(같은 품번) — 단가가 있을 때만. (2026-09-30 오전판의 직접입력·단가표는 매입단가로 옮겨 여기서 뺐다)
 --   currency     — 원본 통화 칸(KRW 등). 비면 원화로 본다
 alter table public.intake_order_line add column if not exists unit_price numeric;
 alter table public.intake_order_line add column if not exists amount numeric;
@@ -296,14 +297,39 @@ do $c$ begin
     alter table public.intake_order_line add constraint intake_order_line_unit_price_check
       check (unit_price is null or unit_price > 0);
   end if;
-  if not exists (select 1 from pg_constraint where conname = 'intake_order_line_price_source_check') then
-    alter table public.intake_order_line add constraint intake_order_line_price_source_check
-      check (price_source in ('', '원본', '원본(같은 품번)', '직접입력', '단가표')
-             and ((unit_price is null) = (price_source = '')));
-  end if;
+  -- 판매단가 출처를 원본·원본(같은 품번)으로 좁힌다(재실행 안전: 지우고 다시 건다).
+  -- 오전판에서 직접입력·단가표로 채운 값은 고객 발주 단가가 아니므로 비운다.
+  alter table public.intake_order_line drop constraint if exists intake_order_line_price_source_check;
+  update public.intake_order_line set unit_price = null, amount = null, price_source = '' where price_source in ('직접입력', '단가표');
+  alter table public.intake_order_line add constraint intake_order_line_price_source_check
+    check (price_source in ('', '원본', '원본(같은 품번)')
+           and ((unit_price is null) = (price_source = '')));
   if not exists (select 1 from pg_constraint where conname = 'intake_order_line_amount_check') then
     alter table public.intake_order_line add constraint intake_order_line_amount_check
       check (amount is null or (unit_price is not null and amount = round(qty * unit_price, 2)));
+  end if;
+end $c$;
+-- 매입단가(생산처 발주) — 기획서 11.12, 2026-09-30 두 번째 답변. 당사 → 생산처 발주단가로 고객 발주 단가와 무관하다.
+--   buy_price  — 매입단가표(price_master) 또는 직접입력 값. 0·음수는 받지 않는다. ERP 업로드 양식의 「단가」 열이 이 값
+--   buy_amount — 매입금액 = 수량 × 매입단가(소수 둘째 자리 반올림)
+--   buy_source — 단가표 · 직접입력 — 매입단가가 있을 때만
+--   maker      — 생산처(매입단가표의 생산처 칸, 없으면 빈칸)
+alter table public.intake_order_line add column if not exists buy_price numeric;
+alter table public.intake_order_line add column if not exists buy_amount numeric;
+alter table public.intake_order_line add column if not exists buy_source text not null default '';
+alter table public.intake_order_line add column if not exists maker text not null default '';
+do $c$ begin
+  if not exists (select 1 from pg_constraint where conname = 'intake_order_line_buy_price_check') then
+    alter table public.intake_order_line add constraint intake_order_line_buy_price_check
+      check (buy_price is null or buy_price > 0);
+  end if;
+  if not exists (select 1 from pg_constraint where conname = 'intake_order_line_buy_source_check') then
+    alter table public.intake_order_line add constraint intake_order_line_buy_source_check
+      check (buy_source in ('', '단가표', '직접입력') and ((buy_price is null) = (buy_source = '')));
+  end if;
+  if not exists (select 1 from pg_constraint where conname = 'intake_order_line_buy_amount_check') then
+    alter table public.intake_order_line add constraint intake_order_line_buy_amount_check
+      check (buy_amount is null or (buy_price is not null and buy_amount = round(qty * buy_price, 2)));
   end if;
 end $c$;
 
@@ -353,32 +379,49 @@ create table if not exists public.part_mapping (
   company_pn    text not null check (length(btrim(company_pn)) > 0),      -- 천일품번
   source_file   text not null default '',
   source_row    int check (source_row > 0),
+  chosen        boolean not null default false,   -- 충돌에서 사용자가 고른 값(고객사 품번마다 하나). 없으면 source_row 가 작은 쪽
   created_at    timestamptz not null default now(),
   updated_at    timestamptz not null default now(),
   -- ⚠ upsert 시 onConflict: 'owner_id,map_group,customer_pn,company_pn'
   constraint part_mapping_pair_key unique (owner_id, map_group, customer_pn, company_pn)
 );
 create index if not exists part_mapping_lookup_idx on public.part_mapping (owner_id, map_group, customer_pn);
+alter table public.part_mapping add column if not exists chosen boolean not null default false;   -- 2026-09-30 충돌 고르기
+create unique index if not exists part_mapping_chosen_uq on public.part_mapping (owner_id, map_group, customer_pn) where chosen;
 
--- 단가표·직접입력 단가 (price.js). 원본 파일에 단가가 없는 통합 수주 줄을 채운다 — 원본 단가가 늘 우선.
---   price_kind  table = 단가표 파일의 한 줄 / manual = 화면 「단가 없음」 목록에 직접 적은 값(단가표보다 우선)
---   customer    비면 모든 고객사, 있으면 그 고객사 줄에만
---   item        품목코드 — 고객사 품번 또는 천일품번(대문자·공백 없앤 열쇠)
+-- 매입단가표 (price.js, 기획서 11.12) — 당사 → 생산처 발주단가. 수강생이 따로 관리하는 품목별 단가표를 옮긴 것.
+-- 고객사 발주 단가(판매단가)와 무관하다. 통합 수주 줄의 buy_price 를 채운다.
+--   price_kind  table = 매입단가표 파일의 한 줄 / manual = 화면 「매입단가 없음」 목록에 직접 적은 값(단가표에 없는 품목만 — 단가표가 우선)
+--   item        당사 품목코드(천일품번). 매핑 없는 품번은 고객사 원품번(대문자·공백 없앤 열쇠)
+--   maker       생산처(선택)
+--   unit_price  매입단가
+-- 2026-09-30 오전판은 「고객사 × 품목 → 고객 발주 단가를 채우는 표」였다(customer 칸). 뜻이 바뀌어 아래에서 옛 행을 지우고 칸을 뺀다.
 create table if not exists public.price_master (
   id            bigint generated always as identity primary key,
   owner_id      uuid not null default auth.uid(),
   price_kind    text not null default 'table' check (price_kind in ('table', 'manual')),
-  customer      text not null default '',
   item          text not null check (length(btrim(item)) > 0),
+  maker         text not null default '',
   unit_price    numeric not null check (unit_price > 0),
   currency      text not null default 'KRW',
   source_file   text not null default '',
   source_row    int check (source_row > 0),
   created_at    timestamptz not null default now(),
   updated_at    timestamptz not null default now(),
-  -- ⚠ upsert 시 onConflict: 'owner_id,price_kind,customer,item'
-  constraint price_master_item_key unique (owner_id, price_kind, customer, item)
+  -- ⚠ upsert 시 onConflict: 'owner_id,price_kind,item'
+  constraint price_master_item_key unique (owner_id, price_kind, item)
 );
+-- 오전판 표가 이미 있으면: 옛 행(고객 발주 단가)은 매입단가가 아니므로 지우고, customer 칸을 빼고(그 칸이 든 UNIQUE 도 함께 빠짐), 새 UNIQUE 를 건다
+do $c$ begin
+  if exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'price_master' and column_name = 'customer') then
+    delete from public.price_master;
+    alter table public.price_master drop column customer;
+  end if;
+  if not exists (select 1 from pg_constraint where conname = 'price_master_item_key') then
+    alter table public.price_master add constraint price_master_item_key unique (owner_id, price_kind, item);
+  end if;
+end $c$;
+alter table public.price_master add column if not exists maker text not null default '';
 create index if not exists price_master_lookup_idx on public.price_master (owner_id, item);
 
 -- ERP 업로드 양식 설정 (upload.js defaultOptions + 넣은 양식의 머리행) — 사용자당 한 행
@@ -387,22 +430,31 @@ create table if not exists public.upload_setting (
   template_sheet    text not null default '웹자료올리기',
   template_headers  text[] not null default '{}',                      -- 비면 내장 기본 양식(17열)
   date_mode         text not null default 'today' check (date_mode in ('today', 'order', 'base')),
-  date_format       text not null default 'dash' check (date_format in ('dash', 'compact')),
-  seq_mode          text not null default 'row' check (seq_mode in ('row', 'party')),
-  top_item          text not null default 'blank' check (top_item in ('blank', 'same')),
+  date_format       text not null default 'compact' check (date_format in ('dash', 'compact')),  -- 확정(2026-09-30): 20260930
+  seq_mode          text not null default 'row' check (seq_mode in ('row', 'party')),            -- 확정: 1, 2, 3 순차
+  top_item          text not null default 'same' check (top_item in ('blank', 'same')),          -- 확정: 품목코드와 같은 값
   name_mode         text not null default 'order' check (name_mode in ('order', 'blank')),
-  unmapped          text not null default 'skip' check (unmapped in ('skip', 'keep')),
-  price_col         text not null default 'add' check (price_col in ('add', 'none')),  -- 양식에 단가 열이 없을 때 「수량」 뒤에 「단가」를 더함
+  unmapped          text not null default 'keep' check (unmapped in ('skip', 'keep')),           -- 확정: 고객사 원품번 그대로
+  price_col         text not null default 'add' check (price_col in ('add', 'none')),  -- 양식에 단가 열이 없을 때 「수량」 뒤에 「단가」(= 매입단가)를 더함
   manager           text not null default '',
-  parties           jsonb not null default '{}'::jsonb check (jsonb_typeof(parties) = 'object'),  -- {고객사 · 공장 · 구분: {code, name, manager}}
+  item_parties      jsonb not null default '{}'::jsonb check (jsonb_typeof(item_parties) = 'object'),  -- 확정: 품번별 수기입력 {품목코드: {code, name, manager}}
+  parties           jsonb not null default '{}'::jsonb check (jsonb_typeof(parties) = 'object'),  -- 묶음 기본값(선택) {고객사 · 공장 · 구분: {code, name, manager}}
   fixed             jsonb not null default '{}'::jsonb check (jsonb_typeof(fixed) = 'object'),    -- {열 이름: 고정값}
   created_at        timestamptz not null default now(),
   updated_at        timestamptz not null default now()
 );
-alter table public.upload_setting add column if not exists price_col text not null default 'add';   -- 2026-09-30 발주단가
+alter table public.upload_setting add column if not exists price_col text not null default 'add';   -- 2026-09-30 단가 열(매입단가)
+-- 2026-09-30 두 번째 답변으로 확정한 기본값 — 이미 만들어진 표에도 반영(재실행 안전, 저장된 행은 그대로)
+alter table public.upload_setting alter column date_format set default 'compact';
+alter table public.upload_setting alter column top_item set default 'same';
+alter table public.upload_setting alter column unmapped set default 'keep';
+alter table public.upload_setting add column if not exists item_parties jsonb not null default '{}'::jsonb;
 do $c$ begin
   if not exists (select 1 from pg_constraint where conname = 'upload_setting_price_col_check') then
     alter table public.upload_setting add constraint upload_setting_price_col_check check (price_col in ('add', 'none'));
+  end if;
+  if not exists (select 1 from pg_constraint where conname = 'upload_setting_item_parties_check') then
+    alter table public.upload_setting add constraint upload_setting_item_parties_check check (jsonb_typeof(item_parties) = 'object');
   end if;
 end $c$;
 
