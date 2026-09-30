@@ -241,7 +241,7 @@ do $t$
 declare v_b bigint := current_setting('test.a_batch')::bigint;
 begin
   perform public._assert_eq((select borrow_price from public.intake_setting), true, '단가 칸 없는 줄은 같은 품번 단가로 채우는 것이 기본이다');
-  perform public._assert_eq((select price_col from public.upload_setting), 'add', '업로드 기본값: 양식에 단가 열이 없으면 더한다');
+  perform public._assert_eq((select price_col from public.upload_setting), 'none', '업로드 기본값(2026-09-30 확정): 기존 17열 그대로, 단가 열을 더하지 않는다');
   insert into public.intake_order_line (batch_id, kind, item, qty, due_date, source_file, source_row, unit_price, amount, price_source, currency)
     values (v_b, 'CKD', 'SMP-K601', 500, '2026-10-14', '2026.09.29_납품예정CKD건기.xlsx', '2', 1200, 600000, '원본', 'KRW'),
            (v_b, '엔진', 'SMP-E401', 1, '2026-10-02', '2026.09.29_누적결품 군산엔진.xlsx', '2', 5000, 5000, '원본(같은 품번)', ''),
@@ -301,6 +301,28 @@ begin
   perform public._assert_raises($q$insert into public.price_master (item, unit_price) values ('X', -1)$q$, '23514', '단가는 양수만');
   perform public._assert_raises($q$insert into public.price_master (price_kind, item, unit_price) values ('guess', 'X', 1)$q$, '23514', '단가 종류는 table/manual 만');
   perform public._assert_raises($q$update public.upload_setting set price_col = 'end'$q$, '23514', '단가 열 설정은 add/none 만');
+end $t$;
+
+do $t$ begin raise notice '[프로젝트] 월별 수주 vs 매입 뷰 (기획서 11.13)'; end $t$;
+do $t$
+declare v_m bigint;
+begin
+  insert into public.intake_batch (base_date) values ('2026-09-30') returning id into v_m;
+  -- 손으로 계산: 10월 = 둘 다(10×100 / 10×70) · 매입 없음(5×200) · 판매 없음(4×70), 11월 = 둘 다(2×50 / 2×60)
+  insert into public.intake_order_line (batch_id, customer, kind, item, qty, due_date, order_date, source_file, source_row, unit_price, amount, price_source, buy_price, buy_amount, buy_source) values
+    (v_m, '가', '엔진', 'A', 10, '2026-10-05', '2026-09-20', 'm.xlsx', '1', 100, 1000, '원본', 70, 700, '단가표'),
+    (v_m, '가', '엔진', 'B', 5, '2026-10-20', '2026-09-25', 'm.xlsx', '2', 200, 1000, '원본', null, null, ''),
+    (v_m, '나', '밥캣', 'A', 4, '2026-10-31', null, 'm.xlsx', '3', null, null, '', 70, 280, '단가표'),
+    (v_m, '나', '밥캣', 'C', 2, '2026-11-02', '2026-10-01', 'm.xlsx', '4', 50, 100, '원본', 60, 120, '직접입력');
+  perform public._assert_eq((select array[row_count, sale_none, buy_none, both_rows]::int[] from public.intake_monthly_summary where batch_id = v_m and month_basis = 'due' and month = '2026-10'),
+    array[3, 1, 1, 1], '10월(납기월): 3행, 판매단가 없음 1, 매입단가 없음 1, 비교 1');
+  perform public._assert_eq((select array[sale_amount, buy_amount, diff, rate] from public.intake_monthly_summary where batch_id = v_m and month_basis = 'due' and month = '2026-10'),
+    array[2000, 980, 300, 30.0]::numeric[], '10월: 수주 2,000 · 매입 980 · 차액 300(둘 다 있는 줄만) · 차익률 30%');
+  perform public._assert_eq((select array[diff, rate] from public.intake_monthly_summary where batch_id = v_m and month_basis = 'due' and month = '2026-11'),
+    array[-20, -20.0]::numeric[], '11월: 매입이 비싸면 차액·차익률 음수');
+  perform public._assert_eq((select string_agg(month || ':' || row_count, ',' order by month) from public.intake_monthly_summary where batch_id = v_m and month_basis = 'order'),
+    ':1,2026-09:2,2026-10:1', '발주월: 발주일 없는 줄은 빈 달 한 칸');
+  delete from public.intake_batch where id = v_m;
 end $t$;
 
 do $t$ begin raise notice '[프로젝트] 기록성 표(shipment_plan_log)'; end $t$;

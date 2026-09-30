@@ -187,3 +187,12 @@ table.list input[type="number"] { width: 100px; }
 .kpi-btn:focus-visible { outline: 3px solid var(--primary); outline-offset: 2px; }
 ul.plain { list-style: none; margin: 0; padding: 0; }
 ul.plain li + li { margin-top: 2px; }
+
+/* 월별 수주 vs 매입 (기획서 11.13) — 수주·매입 금액 막대 */
+table.list tbody tr.total td { background: #eef2f6; font-weight: 600; }
+td.mbars { min-width: 140px; }
+.mbar { display: block; height: 8px; border-radius: 3px; min-width: 1px; }
+.mbar + .mbar { margin-top: 3px; }
+.mbar.sale, .mbar-key.sale { background: var(--primary); }
+.mbar.buy, .mbar-key.buy { background: var(--st-short); }
+.legend i.mbar-key { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }

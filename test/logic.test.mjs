@@ -491,13 +491,26 @@ test('값(2026-09-30 확정): 일자 = 등록일자(오늘) 20260930, 순번 1�
   assert.equal(out.noParty, out.count);
   assert.equal(U.build(MI.rows, null, { unmapped: 'skip' }, { today: TODAY }).count, MI.rows.length - MI.stats.unmapped);
 });
-test('저장된 옛 설정(판 1)은 확정값으로 올리고 납품처·고정값은 그대로 · 판 2 설정은 사용자가 바꾼 값을 유지', () => {
-  const old = U.upgradeOptions({ dateFormat: 'dash', topItem: 'blank', unmapped: 'skip', seqMode: 'party', parties: { a: { code: 'P1' } }, fixed: { '창고': 'W1' } });
-  assert.deepEqual([old.v, old.dateMode, old.dateFormat, old.seqMode, old.topItem, old.unmapped], [2, 'today', 'compact', 'row', 'same', 'keep']);
-  assert.deepEqual([old.parties.a.code, old.fixed['창고']], ['P1', 'W1']);
-  const cur = U.upgradeOptions({ v: 2, dateFormat: 'dash' });
-  assert.equal(cur.dateFormat, 'dash');
+test('저장된 옛 설정: 판 1 → 두 번째 답변 확정값, 판 2 → 단가 열 없음·비우기 확정 열의 고정값 지움, 사용자가 바꾼 뒤 판 값은 유지', () => {
+  const old = U.upgradeOptions({ dateFormat: 'dash', topItem: 'blank', unmapped: 'skip', seqMode: 'party', priceCol: 'add', parties: { a: { code: 'P1' } }, fixed: { '창고': 'W1', '없는열': 'Z' } });
+  assert.deepEqual([old.v, old.dateMode, old.dateFormat, old.seqMode, old.topItem, old.unmapped, old.priceCol], [3, 'today', 'compact', 'row', 'same', 'keep', 'none']);
+  assert.deepEqual([old.parties.a.code, old.fixed['창고'], old.fixed['없는열']], ['P1', undefined, 'Z']); // 창고는 「비움」 확정 열
+  const v2 = U.upgradeOptions({ v: 2, dateFormat: 'dash', priceCol: 'add', fixed: { '적요': 'x', 'BOM버전': '1', '작업지시No.': 'W' }, itemParties: { K: { code: 'C1' } } });
+  assert.deepEqual([v2.dateFormat, v2.priceCol, Object.keys(v2.fixed).length, v2.itemParties.K.code], ['dash', 'none', 0, 'C1']);
+  const v3 = U.upgradeOptions({ v: 3, priceCol: 'add', fixed: { '창고': 'W2' } });     // 판 3 에서 사용자가 다시 켠 값은 그대로
+  assert.deepEqual([v3.priceCol, v3.fixed['창고']], ['add', 'W2']);
   assert.deepEqual(U.upgradeOptions(null).itemParties, {});
+  assert.equal(U.defaultOptions().priceCol, 'none');
+});
+test('세 번째 답변(2026-09-30): 기본 내보내기 = 기존 17열 그대로(단가 열 없음), 모르는 7열은 모두 빈칸, 17열 중 단가·금액 열은 없음', () => {
+  const out = U.build(MI.rows, null, {}, { today: TODAY, base: RS.base });
+  assert.equal(out.aoa[0].length, 17); assert.deepEqual(out.added, []); assert.equal(out.noPrice, 0);
+  assert.deepEqual(out.aoa[0], U.DEFAULT_HEADERS);
+  assert.deepEqual(U.DEFAULT_HEADERS.filter((x) => ['price', 'amount', 'sale', 'saleAmount'].includes(U.fieldOf(x))), []);
+  assert.deepEqual(U.BLANK_COLS.slice().sort(), ['BOM버전', '규격', '작업지시No.', '적요', '창고', '추가문자형식1', '하위반제품수'].sort());
+  assert.ok(U.BLANK_COLS.every((c) => out.blankCols.includes(c)));
+  assert.deepEqual(out.unknown.slice().sort(), U.BLANK_COLS.slice().sort());                 // 자동으로 채우지 않는 열 = 비우기로 확정된 7열
+  assert.ok(U.isBlankCol('작업지시 No') && !U.isBlankCol('품목코드'));
 });
 test('사용자 양식이면 그 열 순서를 따름 · 납품처표·고정값·일자(발주일)·순번(납품처별)·날짜 모양 설정', () => {
   const tpl = U.readTemplate({ names: ['기타', '웹자료올리기'], sheets: { '기타': [['x']], '웹자료올리기': [['안내문'], ['수량', '품목코드', '창고', '일자', '순번', '납품처 코드', '없는열']] } });
@@ -665,7 +678,7 @@ test('내보내기: 통합수주에 판매단가(고객 발주)·매입단가(�
 });
 test('업로드 양식의 단가 = 매입단가: 단가 열이 없으면 「수량」 뒤에 「단가」, 양식에 매입단가·금액·판매단가·생산처 열이 있으면 그 열에', () => {
   const R = P.apply(MI.rows, PT, {});
-  const out = U.build(R.rows, null, {}, { today: TODAY });
+  const out = U.build(R.rows, null, { priceCol: 'add' }, { today: TODAY });   // 선택으로 남겨 둔 「단가 열 더하기」
   const H = out.aoa[0];
   assert.equal(H.length, 18); assert.equal(H[H.indexOf('수량') + 1], '단가'); assert.deepEqual(out.added, ['단가']);
   const body = out.aoa.slice(1), k = body.find((r) => r[H.indexOf('품목코드')] === 'CH-K601');
@@ -675,7 +688,62 @@ test('업로드 양식의 단가 = 매입단가: 단가 열이 없으면 「수�
   assert.deepEqual(own.added, []);
   assert.deepEqual(own.aoa.find((r) => r[0] === 'CH-K601'), ['CH-K601', 500, 800, 400000, 1200, '생산처B(가상)']);
   assert.deepEqual(U.build(R.rows, { sheet: 's', headers: ['품목코드', '발주단가'] }, {}, { today: TODAY }).aoa.find((r) => r[0] === 'CH-K601'), ['CH-K601', 800]); // 발주단가 = 당사 → 생산처
-  assert.deepEqual(U.build(R.rows, { sheet: 's', headers: ['품목코드', '규격'] }, {}, { today: TODAY }).aoa[0], ['품목코드', '규격', '단가']); // 수량 열이 없으면 맨 끝
+  assert.deepEqual(U.build(R.rows, { sheet: 's', headers: ['품목코드', '규격'] }, { priceCol: 'add' }, { today: TODAY }).aoa[0], ['품목코드', '규격', '단가']); // 수량 열이 없으면 맨 끝
+  assert.deepEqual(U.build(R.rows, { sheet: 's', headers: ['품목코드', '규격'] }, {}, { today: TODAY }).aoa[0], ['품목코드', '규격']);          // 기본은 더하지 않음
+});
+
+console.log('매입단가표는 천일품번 기준 · 월별 수주 vs 매입 — 기획서 11.13');
+test('매입단가표는 천일품번으로만 찾음: 매핑된 행은 고객사 품번이 표에 있어도 쓰지 않고, 매핑 없는 행은 원품번으로 찾음', () => {
+  const t = { map: { X1: { price: 5, maker: '' }, 'CH-Y1': { price: 7, maker: '' }, Z1: { price: 9, maker: '' } } };
+  const rows = [{ item: 'X1', customerItem: 'X1', company: 'CH-X1', mapStatus: 'mapped', qty: 2 },
+    { item: 'Y1', customerItem: 'Y1', company: 'CH-Y1', mapStatus: 'mapped', qty: 2 },
+    { item: 'Z1', company: 'Z1', mapStatus: 'unmapped', qty: 2 }];
+  assert.deepEqual(P.apply(rows, t, {}).rows.map((r) => r.buyPrice), [null, 7, 9]);
+});
+const MO = require('../js/monthly.js');
+// 손으로 계산한 작은 표: 10월 3줄(둘 다 · 매입 없음 · 판매 없음), 11월 1줄, 납기 없는 줄 1
+const MR = [
+  { customer: '가', group: '엔진', company: 'A', item: 'a', qty: 10, price: 100, buyPrice: 70, due: '2026-10-05', orderDate: '2026-09-20', name: '품A' },
+  { customer: '가', group: '엔진', company: 'B', item: 'b', qty: 5, price: 200, buyPrice: null, due: '2026-10-20', orderDate: '2026-09-25' },
+  { customer: '나', group: '밥캣', company: 'A', item: 'a2', qty: 4, price: null, buyPrice: 70, due: '2026-10-31', orderDate: '2026-10-01' },
+  { customer: '나', group: '밥캣', company: 'C', item: 'c', qty: 2, price: 50, buyPrice: 60, due: '2026-11-02', orderDate: '' },
+  { customer: '가', group: '엔진', company: 'A', item: 'a', qty: 1, price: 100, buyPrice: 70, due: '', orderDate: '2026-10-02' }
+];
+test('월별 집계(납기월): 수주금액 = 수량 × 판매단가, 매입금액 = 수량 × 매입단가, 쪽마다 단가 없음 행 수, 차액·차익률은 둘 다 있는 줄만', () => {
+  const S = MO.summarize(MR);
+  assert.deepEqual(S.months.map((m) => m.label), ['2026-10', '2026-11', '(납기일 없음)']);
+  const o = S.months[0];
+  assert.deepEqual([o.rows, o.qty, o.sale, o.saleNone, o.buy, o.buyNone, o.bothRows, o.diff, o.rate], [3, 19, 2000, 1, 980, 1, 1, 300, 30]);
+  const n = S.months[1];
+  assert.deepEqual([n.sale, n.buy, n.diff, n.rate], [100, 120, -20, -20]);                    // 매입이 비싸면 음수
+  const T = S.total;
+  assert.deepEqual([T.rows, T.sale, T.buy, T.saleNone, T.buyNone, T.bothRows, T.bothSale, T.bothBuy, T.diff, T.rate], [5, 2200, 1170, 1, 1, 3, 1200, 890, 310, 25.8]);
+  assert.equal(S.months.reduce((s, m) => s + m.sale, 0), T.sale);
+  assert.equal(MO.summarize([{ qty: 1, price: 10, buyPrice: null, due: '2026-10-01' }]).total.diff, null); // 비교할 줄이 없으면 비움
+});
+test('월별 집계(발주월 선택) · 고객사·구분별 · 품목별 상위 N + 나머지 한 줄', () => {
+  const S = MO.summarize(MR, { by: 'order', topN: 1 });
+  assert.equal(S.byLabel, '발주월');
+  assert.deepEqual(S.months.map((m) => [m.label, m.rows]), [['2026-09', 2], ['2026-10', 2], ['(발주일 없음)', 1]]);
+  assert.deepEqual(S.total.groups.map((g) => [g.customer, g.group, g.sale, g.buy]), [['가', '엔진', 2100, 770], ['나', '밥캣', 100, 400]]);
+  const it = S.total.items;
+  assert.equal(S.total.itemCount, 3);
+  assert.deepEqual([it[0].item, it[0].qty, it[0].sale, it[0].buy, it[0].name], ['A', 15, 1100, 1050, '품A']);   // 천일품번 A 로 묶음(고객사 품번 a · a2)
+  assert.deepEqual([it[1].item, it[1].rest, it[1].sale, it[1].buy], ['그 밖 2품목', 2, 1100, 120]);
+  assert.equal(MO.options({ topN: 'x' }).topN, MO.DEFAULT_TOP);
+});
+test('Excel 시트 「월별 수주 vs 매입」: 월별 표 + 합계 + 고객사·구분별 + 품목별, 예시 데이터로 합계가 매입단가 붙이기 결과와 같음', () => {
+  const A = MO.aoa(MO.summarize(MR));
+  assert.equal(MO.SHEET, '월별 수주 vs 매입');
+  const hi = A.findIndex((r) => r[0] === '납기월' && r[1] === '행 수');
+  assert.deepEqual(A[hi + 1].slice(0, 10), ['2026-10', 3, 19, 2000, 1, 980, 1, 1, 300, 30]);
+  assert.deepEqual(A.find((r) => r[0] === '합계').slice(3, 6), [2200, 1, 1170]);
+  assert.ok(A.some((r) => r[0] === '고객사 · 구분별') && A.some((r) => /^품목별/.test(r[0])));
+  const R = P.apply(MI.rows, PT, {}), S = MO.summarize(R.rows);
+  assert.equal(S.total.buy, R.stats.buyAmount); assert.equal(S.total.sale, R.stats.saleAmount);
+  assert.deepEqual([S.total.buyNone, S.total.saleNone], [R.stats.buyNone, R.stats.saleNone]);
+  assert.equal(S.total.diff, R.stats.marginAmount);                                             // 차액 = 판매 − 매입 합계(둘 다 있는 줄)
+  assert.equal(S.total.rows, MI.rows.length);
 });
 
 console.log(`\n${passed}개 통과`);

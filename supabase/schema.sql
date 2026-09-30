@@ -37,7 +37,8 @@
 --    ── 단가 두 가지 (기획서 11.11 · 11.12, 2026-09-30 두 번째 답변으로 나눔) ──
 --    intake_order_line 의 unit_price · amount · price_source — 판매단가(고객 발주, 참고): 고객사 파일의 단가 칸 · 판매금액 · 출처
 --    intake_order_line 의 buy_price · buy_amount · buy_source · maker — 매입단가(생산처 발주): 당사 → 생산처 발주단가 · 매입금액 · 출처 · 생산처
---    price_master       — 매입단가표(당사 품목코드 → 매입단가 · 생산처)와 화면에서 직접 적은 매입단가. 고객 발주 단가와 무관
+--    price_master       — 매입단가표(천일품번 → 매입단가 · 생산처, 2026-09-30 확정)와 화면에서 직접 적은 매입단가. 고객 발주 단가와 무관
+--    intake_monthly_summary (뷰) — 월별 수주 vs 매입(납기월·발주월 × 수주금액·매입금액·단가 없음 행 수·차액·차익률), 기획서 11.13
 --
 --  접근 규칙
 --    · 자료는 올린 사람(owner_id)만 쓰고 고친다.
@@ -333,6 +334,39 @@ do $c$ begin
   end if;
 end $c$;
 
+-- 월별 수주 vs 매입 (기획서 11.13, 2026-09-30 세 번째 답변의 새 요청 — 화면 「월별 수주 vs 매입」, js/monthly.js 와 같은 계산)
+--   month_basis  — due 납기월 | order 발주월. 날짜가 없는 줄은 month = '' 한 칸
+--   sale_amount  — 수주금액 = 수량 × 판매단가(판매단가 있는 줄만), sale_none = 판매단가 없는 행 수
+--   buy_amount   — 매입금액 = 수량 × 매입단가(매입단가 있는 줄만), buy_none = 매입단가 없는 행 수
+--   diff · rate  — 두 단가가 모두 있는 줄끼리의 차액(수주 − 매입)과 차익률(%) — 한쪽만 있는 줄을 섞지 않는다
+--   security_invoker 라 intake_order_line 의 RLS(본인 · 구성원 읽기)를 그대로 따른다. 표를 새로 만들지 않는다(계산 결과라 저장하지 않음)
+create or replace view public.intake_monthly_summary with (security_invoker = true) as
+with l as (
+  select owner_id, batch_id, customer, kind, qty, due_date, order_date,
+         case when unit_price is null then null else coalesce(amount, round(qty * unit_price, 2)) end as sale_amt,
+         case when buy_price is null then null else coalesce(buy_amount, round(qty * buy_price, 2)) end as buy_amt
+  from public.intake_order_line
+), m as (
+  select owner_id, batch_id, 'due'::text as month_basis, to_char(due_date, 'YYYY-MM') as month, qty, sale_amt, buy_amt from l
+  union all
+  select owner_id, batch_id, 'order'::text, coalesce(to_char(order_date, 'YYYY-MM'), ''), qty, sale_amt, buy_amt from l
+)
+select owner_id, batch_id, month_basis, month,
+       count(*)::int                                                         as row_count,
+       sum(qty)                                                              as qty,
+       coalesce(sum(sale_amt), 0)                                            as sale_amount,
+       count(*) filter (where sale_amt is null)::int                         as sale_none,
+       coalesce(sum(buy_amt), 0)                                             as buy_amount,
+       count(*) filter (where buy_amt is null)::int                          as buy_none,
+       count(*) filter (where sale_amt is not null and buy_amt is not null)::int as both_rows,
+       sum(sale_amt - buy_amt) filter (where sale_amt is not null and buy_amt is not null) as diff,
+       round(sum(sale_amt - buy_amt) filter (where sale_amt is not null and buy_amt is not null) * 100
+             / nullif(sum(sale_amt) filter (where sale_amt is not null and buy_amt is not null), 0), 1) as rate
+from m
+group by owner_id, batch_id, month_basis, month;
+revoke all on public.intake_monthly_summary from public, anon;
+grant select on public.intake_monthly_summary to authenticated;
+
 -- 파일별 집계
 create table if not exists public.intake_file (
   id          bigint generated always as identity primary key,
@@ -435,7 +469,7 @@ create table if not exists public.upload_setting (
   top_item          text not null default 'same' check (top_item in ('blank', 'same')),          -- 확정: 품목코드와 같은 값
   name_mode         text not null default 'order' check (name_mode in ('order', 'blank')),
   unmapped          text not null default 'keep' check (unmapped in ('skip', 'keep')),           -- 확정: 고객사 원품번 그대로
-  price_col         text not null default 'add' check (price_col in ('add', 'none')),  -- 양식에 단가 열이 없을 때 「수량」 뒤에 「단가」(= 매입단가)를 더함
+  price_col         text not null default 'none' check (price_col in ('add', 'none')),  -- 확정(2026-09-30 세 번째 답변): none 기존 17열 그대로 | add 「수량」 뒤에 「단가」(= 매입단가)
   manager           text not null default '',
   item_parties      jsonb not null default '{}'::jsonb check (jsonb_typeof(item_parties) = 'object'),  -- 확정: 품번별 수기입력 {품목코드: {code, name, manager}}
   parties           jsonb not null default '{}'::jsonb check (jsonb_typeof(parties) = 'object'),  -- 묶음 기본값(선택) {고객사 · 공장 · 구분: {code, name, manager}}
@@ -448,6 +482,8 @@ alter table public.upload_setting add column if not exists price_col text not nu
 alter table public.upload_setting alter column date_format set default 'compact';
 alter table public.upload_setting alter column top_item set default 'same';
 alter table public.upload_setting alter column unmapped set default 'keep';
+-- 2026-09-30 세 번째 답변: 업로드는 기존 17열 양식 그대로(단가 입력란 없음) — 기본값만 바꾸고 저장된 행은 그대로
+alter table public.upload_setting alter column price_col set default 'none';
 alter table public.upload_setting add column if not exists item_parties jsonb not null default '{}'::jsonb;
 do $c$ begin
   if not exists (select 1 from pg_constraint where conname = 'upload_setting_price_col_check') then

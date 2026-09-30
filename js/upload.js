@@ -3,6 +3,9 @@
    통합 수주(천일품번 붙인 것)를 한 행씩 써 넣습니다. 채울 수 없는 열은 비우거나, 화면의 설정표(품번별 납품처·고정값)로 채웁니다.
    2026-09-30 확정: 일자 = 등록일자(오늘, 20260930) · 순번 1, 2, 3 · 품목코드(상단) = 품목코드 · 매핑 없는 품번은 고객사 원품번 그대로 ·
    납품처 코드·납품처명·담당자는 품번별 수기입력(기억) · 단가 열 = 매입단가(생산처 발주).
+   2026-09-30 세 번째 답변(판 3): 업로드는 기존 17열 양식 그대로 — 단가 열을 더하지 않습니다(priceCol 기본 none).
+   17열 중 단가·금액에 해당하는 열은 없어 매입단가·매입금액은 도구 화면·통합 수주 Excel·월별 수주 vs 매입에서 봅니다.
+   작업지시No.·BOM버전·추가문자형식1·창고·적요·하위반제품수·규격은 비움(확정).
    내장 기본 양식은 머리행 이름만 담습니다(열 이름은 일반 명칭이라 리포에 둡니다). 사용자가 자기 양식 파일을 넣으면 그 순서를 따릅니다.
    브라우저(window.SPUpload)와 node(require) 양쪽에서 씁니다. */
 (function (root, factory) {
@@ -29,6 +32,9 @@
     '판매단가': 'sale', '판매금액': 'saleAmount', '생산처': 'maker', '생산처명': 'maker', '매입처': 'maker'
   };
   var PRICE_HEADER = '단가';
+  // 2026-09-30 세 번째 답변: 모두 비워 올림(확정). 고정값 표에 값을 적으면 그 값이 들어가지만 기본은 빈칸입니다
+  var BLANK_COLS = ['추가문자형식1', '작업지시No.', 'BOM버전', '규격', '창고', '적요', '하위반제품수'];
+  function isBlankCol(h) { var k = norm(h); return BLANK_COLS.some(function (b) { return norm(b) === k; }); }
   var FIELD_LABEL = {
     date: '등록일자 = 오늘(20260930 모양)', seq: '순번 — 1, 2, 3 차례로', partyCode: '품번별 납품처표(없으면 묶음 기본값)', partyName: '품번별 납품처표(없으면 묶음 기본값)',
     manager: '품번별 납품처표(없으면 묶음 기본값 → 기본 담당자)', due: '통합 수주의 납기일', topItem: '품목코드와 같은 값', item: '천일품번(매핑 없으면 고객사 원품번)', name: '설정(수주 파일의 품명·비움)', qty: '통합 수주의 수량',
@@ -37,9 +43,12 @@
   };
   function fieldOf(header) { return FIELDS[norm(header)] || null; }
 
-  // 2026-09-30 두 번째 답변으로 확정한 값(판 2). 이전 판에서 저장된 설정은 upgradeOptions 가 이 값으로 바꿉니다
-  var OPTIONS_VERSION = 2;
-  var CONFIRMED = { dateMode: 'today', dateFormat: 'compact', seqMode: 'row', topItem: 'same', unmapped: 'keep' };
+  // 확정값. 판 2 = 2026-09-30 두 번째 답변, 판 3 = 세 번째 답변(17열 그대로 · 단가 열 없음 · 모르는 열은 비움).
+  // 이전 판에서 저장된 설정은 upgradeOptions 가 판마다 그 판의 확정값만 덮어씁니다(뒤 판에서 사용자가 바꾼 값은 유지)
+  var OPTIONS_VERSION = 3;
+  var CONFIRMED_V2 = { dateMode: 'today', dateFormat: 'compact', seqMode: 'row', topItem: 'same', unmapped: 'keep' };
+  var CONFIRMED_V3 = { priceCol: 'none' };
+  var CONFIRMED = Object.assign({}, CONFIRMED_V2, CONFIRMED_V3);
   function defaultOptions() {
     return {
       v: OPTIONS_VERSION,
@@ -49,7 +58,7 @@
       topItem: 'same',       // 확정: 품목코드(상단) = 품목코드와 같은 값 | blank 비움
       nameMode: 'order',     // order 수주 파일의 품명 | blank 비움(ERP 가 품목코드로 채우는 경우)
       unmapped: 'keep',      // 확정: 매핑표에 없는 품번은 고객사 원품번 그대로 올림 | skip 빼고 내보냄
-      priceCol: 'add',       // 양식에 단가 열이 없을 때: add 「수량」 바로 뒤에 「단가」(= 매입단가) 열을 더함 | none 더하지 않음 — 확인 부탁(ERP 가 열이 늘어도 받는지)
+      priceCol: 'none',      // 확정(판 3): none 기존 17열 양식 그대로 | add 「수량」 바로 뒤에 「단가」(= 매입단가) 열을 더함(선택으로 남겨 둠)
       manager: '',           // 기본 담당자(품번별·묶음 기본값에 담당자가 없을 때)
       itemParties: {},       // 확정: 납품처 코드·납품처명·담당자는 수기입력, 품번별로 다름 → { 품목코드 열쇠: { code, name, manager } } 한 번 적으면 기억
       parties: {},           // 묶음 기본값(선택) { 고객사 · 공장 · 구분: { code, name, manager } } — 품번별 값이 없을 때만
@@ -65,17 +74,23 @@
     if (['blank', 'same'].indexOf(d.topItem) < 0) d.topItem = 'same';
     if (['order', 'blank'].indexOf(d.nameMode) < 0) d.nameMode = 'order';
     if (['skip', 'keep'].indexOf(d.unmapped) < 0) d.unmapped = 'keep';
-    if (['add', 'none'].indexOf(d.priceCol) < 0) d.priceCol = 'add';
+    if (['add', 'none'].indexOf(d.priceCol) < 0) d.priceCol = 'none';
     d.manager = str(d.manager);
     if (!d.parties || typeof d.parties !== 'object' || Array.isArray(d.parties)) d.parties = {};
     if (!d.itemParties || typeof d.itemParties !== 'object' || Array.isArray(d.itemParties)) d.itemParties = {};
     if (!d.fixed || typeof d.fixed !== 'object') d.fixed = {};
     return d;
   }
-  /** 저장된 설정 읽기: 판이 2 보다 낮으면(확정 전 기본값으로 저장된 것) 확정값으로 바꿉니다. 납품처·고정값은 그대로 */
+  /** 저장된 설정 읽기: 판마다 그 판의 확정값으로 바꿉니다. 판 1 → 두 번째 답변 값, 판 2 이하 → 단가 열 없음 + 비우기로 확정된 열의 고정값을 지움.
+      납품처(품번별·묶음)와 그 밖의 고정값은 그대로 둡니다 */
   function upgradeOptions(o) {
-    var d = mergeOptions(o);
-    if (!o || o.v !== OPTIONS_VERSION) { Object.keys(CONFIRMED).forEach(function (k) { d[k] = CONFIRMED[k]; }); d.v = OPTIONS_VERSION; }
+    var d = mergeOptions(o), v = o && typeof o.v === 'number' ? o.v : 1;
+    if (v < 2) Object.keys(CONFIRMED_V2).forEach(function (k) { d[k] = CONFIRMED_V2[k]; });
+    if (v < 3) {
+      Object.keys(CONFIRMED_V3).forEach(function (k) { d[k] = CONFIRMED_V3[k]; });
+      Object.keys(d.fixed).forEach(function (h) { if (isBlankCol(h)) delete d.fixed[h]; });
+    }
+    d.v = OPTIONS_VERSION;
     return d;
   }
 
@@ -262,6 +277,7 @@
   return {
     DEFAULT_SHEET: DEFAULT_SHEET, DEFAULT_HEADERS: DEFAULT_HEADERS, FIELD_LABEL: FIELD_LABEL,
     defaultOptions: defaultOptions, mergeOptions: mergeOptions, upgradeOptions: upgradeOptions, OPTIONS_VERSION: OPTIONS_VERSION, CONFIRMED: CONFIRMED,
+    BLANK_COLS: BLANK_COLS, isBlankCol: isBlankCol,
     defaultTemplate: defaultTemplate, readTemplate: readTemplate,
     fieldOf: fieldOf, partyKey: partyKey, partyKeys: partyKeys, build: build, outHeaders: outHeaders, PRICE_HEADER: PRICE_HEADER,
     key: key, itemCode: itemCode, partyOf: partyOf, itemList: itemList, itemPartiesAoa: itemPartiesAoa, parseItemParties: parseItemParties, mergeItemParties: mergeItemParties, PARTY_HEAD: PARTY_HEAD

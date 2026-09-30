@@ -34,8 +34,9 @@
 | `intake_file` | 파일별 집계(판별 종류, 읽은 행, 수집, 규칙으로 뺀 행과 사유, 메모) | `intake.files` |
 | `intake_check` | 「★확인 필요」 한 줄(파일, 행, 내용, 자세히) | `intake.checks` |
 | `part_mapping` | 고객사 품번 → 천일품번(묶음 doosan 건기·엔진 / bobcat 밥캣). 충돌은 두 행으로 남기고 고른 값은 `chosen`(고객사 품번마다 하나) | `data09-18.partMapping`(별도 키) |
-| `upload_setting` | ERP 업로드 양식 설정(양식 머리행, 일자·순번·품목코드(상단)·품목명 방식, 매핑 없는 품번, 품번별 납품처 `item_parties`, 묶음 기본값, 고정값, 단가 열 더하기). 기본값은 2026-09-30 확정값(20260930 · 품목코드(상단) = 품목코드 · 원품번 그대로) | `uploadOpts`·`uploadTpl` |
-| `price_master` | **매입단가표**(당사 품목코드 → 매입단가 · 생산처)와 화면에서 직접 적은 매입단가(`price_kind` table / manual). 고객 발주 단가와 무관 — 통합 수주 줄의 `buy_price` 를 채움, 단가표가 직접입력보다 우선 | `data09-18.buyPriceTable`(별도 키) · `manualBuy` |
+| `upload_setting` | ERP 업로드 양식 설정(양식 머리행, 일자·순번·품목코드(상단)·품목명 방식, 매핑 없는 품번, 품번별 납품처 `item_parties`, 묶음 기본값, 고정값, 단가 열 더하기). 기본값은 2026-09-30 확정값(20260930 · 품목코드(상단) = 품목코드 · 원품번 그대로 · 단가 열 없이 17열 그대로 `price_col = none`) | `uploadOpts`·`uploadTpl` |
+| `intake_monthly_summary` (뷰) | 월별 수주 vs 매입 — batch · 월 기준(due 납기월 / order 발주월) · 월마다 행 수·수량·수주금액·판매단가 없음·매입금액·매입단가 없음·비교한 행·차액·차익률(두 단가가 모두 있는 줄끼리). `security_invoker` 라 통합 수주 줄의 RLS 그대로 | 화면 「월별 수주 vs 매입」(js/monthly.js) |
+| `price_master` | **매입단가표**(천일품번 → 매입단가 · 생산처, 2026-09-30 확정)와 화면에서 직접 적은 매입단가(`price_kind` table / manual). 고객 발주 단가와 무관 — 통합 수주 줄의 `buy_price` 를 채움, 단가표가 직접입력보다 우선 | `data09-18.buyPriceTable`(별도 키) · `manualBuy` |
 
 지켜지는 규칙은 다음과 같습니다.
 

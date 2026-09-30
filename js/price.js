@@ -4,7 +4,7 @@
                            통합 수주 행의 price · priceSrc(원본 · 원본(같은 품번)) 값이 이것입니다(intake.js 가 채움).
      매입단가(생산처 발주) — 당사 → 생산처 발주단가. 수강생이 따로 관리하는 「품목별 단가표」(품목코드 → 매입단가, 생산처 선택)에서 찾고,
                            단가표에 없는 품목은 화면에서 직접 적습니다. 고객 발주 단가와 무관합니다. ERP 업로드 양식의 단가 열은 이 값입니다.
-   매입단가를 정하는 순서: 1. 매입단가표(당사 품목코드 = 천일품번 → 없으면 고객사 품번) 2. 직접입력. 둘 다 없으면 「매입단가 없음」.
+   매입단가를 정하는 순서: 1. 매입단가표(천일품번 — 매핑 없는 품번은 고객사 원품번) 2. 직접입력. 둘 다 없으면 「매입단가 없음」.
    판매 − 매입(단가 차이)은 둘 다 있을 때만 계산합니다(화면에서 켜고 끔).
    매입단가표·직접입력 값은 실제 회사 자료라 이 브라우저(localStorage)에만 저장합니다(리포에는 가상 예시만).
    브라우저(window.SPPrice)와 node(require) 양쪽에서 씁니다. */
@@ -89,13 +89,12 @@
   function has(t) { return !!(t && t.map && Object.keys(t.map).length); }
   /** 매입단가 열쇠 = 업로드에 쓰는 품목코드(천일품번, 매핑 없으면 고객사 품번) */
   function buyKey(r) { return key(r.company || r.item); }
-  /** 매입단가표에서 한 줄: 천일품번 → 고객사 품번 순서로 찾습니다(매핑이 늦게 붙어도 찾게) */
+  /** 매입단가표에서 한 줄: 2026-09-30 세 번째 답변 — 매입단가표는 천일품번 기준(확정).
+      매핑을 거친 행은 천일품번으로만 찾고, 매핑 없는 행(고객사 원품번을 그대로 올리는 행)만 그 품번으로 찾습니다.
+      (판 0.7 까지는 매핑된 행도 고객사 품번으로 한 번 더 찾았으나, 다른 품목의 천일품번과 우연히 같으면 틀린 단가가 붙어 뺐습니다) */
   function lookup(t, r) {
     if (!has(t)) return null;
-    var a = t.map[buyKey(r)];
-    if (a) return a;
-    var b = t.map[key(r.customerItem || r.item)];
-    return b || null;
+    return t.map[buyKey(r)] || null;
   }
   function amount(qty, price) { return price == null ? null : round2(qty * price); }
 

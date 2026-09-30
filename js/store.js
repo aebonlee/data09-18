@@ -30,6 +30,7 @@
       uploadTpl: null, // 사용자가 넣은 업로드 양식의 머리행 {fileName, sheet, headers} — 없으면 내장 기본 양식
       manualBuy: {}, // 「매입단가 없음」 목록에 직접 적은 매입단가 {품목코드 열쇠: 단가} (기획서 11.12)
       showMargin: false, // 판매 − 매입 차이 열 보기
+      monthlyOpts: { by: 'due', topN: 20 }, // 월별 수주 vs 매입: 월 기준(due 납기월 | order 발주월) · 품목 상위 N (기획서 11.13)
       _sample: false
     };
   }
@@ -54,6 +55,7 @@
       if (p.uploadTpl && Array.isArray(p.uploadTpl.headers)) st.uploadTpl = p.uploadTpl;
       if (p.manualBuy && typeof p.manualBuy === 'object') st.manualBuy = p.manualBuy;
       st.showMargin = !!p.showMargin;
+      if (p.monthlyOpts && root.SPMonthly) st.monthlyOpts = root.SPMonthly.options(p.monthlyOpts);
     } catch (e) { /* 깨진 값은 무시하고 빈 상태 */ }
     return st;
   }
