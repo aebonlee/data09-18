@@ -4,6 +4,7 @@
   var KEY = 'data09-18.state';
   var MAP_KEY = 'data09-18.partMapping'; // 고객사 품번 ↔ 천일품번 매핑표(실제 회사 자료 — 이 브라우저에만, 리포에는 없음)
   var PRICE_KEY = 'data09-18.buyPriceTable'; // 매입단가표(당사 품목코드 → 매입단가 · 생산처, 실제 회사 자료 — 이 브라우저에만)
+  var FX_KEY = 'data09-18.fxFile'; // 불러온 환율 기준 파일에서 읽은 값 {rates, stats, file, at} (기획서 11.15)
   var OLD_PRICE_KEY = 'data09-18.priceTable'; // 2026-09-30 오전판 「단가표」(고객 발주 단가를 채우던 것) — 뜻이 바뀌어 읽지 않고 지웁니다
   var memory = {};
   var ok = true;
@@ -31,6 +32,10 @@
       manualBuy: {}, // 「매입단가 없음」 목록에 직접 적은 매입단가 {품목코드 열쇠: 단가} (기획서 11.12)
       showMargin: false, // 판매 − 매입 차이 열 보기
       monthlyOpts: { by: 'due', topN: 20 }, // 월별 수주 vs 매입: 월 기준(due 납기월 | order 발주월) · 품목 상위 N (기획서 11.13)
+      // 환율(기획서 11.15): mode prev 납기월의 전월 평균(기본) | same 당월 평균 · defaultCur 통화가 적히지 않은 매입단가의 통화
+      //   manual {'CNY|2026-09': 환율} 직접 입력(가장 먼저 씀) · useAuto 자동 값(data/rates.js) 사용
+      fx: { mode: 'prev', defaultCur: 'KRW', manual: {}, useAuto: true },
+      manualBuyCur: {}, // 직접 적은 매입단가의 통화 {품목코드 열쇠: 'CNY'…} — 없으면 fx.defaultCur
       _sample: false
     };
   }
@@ -56,6 +61,13 @@
       if (p.manualBuy && typeof p.manualBuy === 'object') st.manualBuy = p.manualBuy;
       st.showMargin = !!p.showMargin;
       if (p.monthlyOpts && root.SPMonthly) st.monthlyOpts = root.SPMonthly.options(p.monthlyOpts);
+      if (p.fx && typeof p.fx === 'object') st.fx = {
+        mode: p.fx.mode === 'same' ? 'same' : 'prev',
+        defaultCur: /^(KRW|CNY|USD|JPY|EUR)$/.test(p.fx.defaultCur) ? p.fx.defaultCur : 'KRW',
+        manual: p.fx.manual && typeof p.fx.manual === 'object' ? p.fx.manual : {},
+        useAuto: p.fx.useAuto !== false
+      };
+      if (p.manualBuyCur && typeof p.manualBuyCur === 'object') st.manualBuyCur = p.manualBuyCur;
     } catch (e) { /* 깨진 값은 무시하고 빈 상태 */ }
     return st;
   }
@@ -70,6 +82,9 @@
     loadPriceTable: function () { if (get(OLD_PRICE_KEY) != null) del(OLD_PRICE_KEY); var raw = get(PRICE_KEY); if (!raw) return null; try { var t = JSON.parse(raw); return t && t.map ? t : null; } catch (e) { return null; } },
     savePriceTable: function (t) { set(PRICE_KEY, JSON.stringify(t)); },
     clearPriceTable: function () { del(PRICE_KEY); },
+    loadFxFile: function () { var raw = get(FX_KEY); if (!raw) return null; try { var t = JSON.parse(raw); return t && t.rates ? t : null; } catch (e) { return null; } },
+    saveFxFile: function (t) { set(FX_KEY, JSON.stringify(t)); },
+    clearFxFile: function () { del(FX_KEY); },
     available: function () { get(KEY); return ok; }
   };
 })(window);

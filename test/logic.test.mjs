@@ -785,4 +785,145 @@ test('납기월 확정: 기본·확정 기준은 납기월 · Excel 첫 덩어�
   assert.equal(MO.aoa(MO.summarize(MR)).findIndex((r) => /단가가 둘 이상/.test(r[0] || '')), -1);   // 없으면 덩어리도 없음
 });
 
+console.log('환율 — China(RMB) 등 외화 단가를 원화로(서울외국환중개 월평균, 납기월의 전월) — 기획서 11.15');
+const FX = require('../js/fx.js');
+const { parseTable } = await import('../scripts/fetch-rates.mjs');
+test('통화 읽기: China(RMB)·RMB·CNY·CNH·위안 = CNY, 엔화 표기, 원화·빈칸, 모르는 통화는 null', () => {
+  assert.deepEqual(['China(RMB)', 'RMB', 'cny', '위안 (CNH)', '중국 위안화', '人民币'].map(FX.normCurrency), ['CNY', 'CNY', 'CNY', 'CNY', 'CNY', 'CNY']);
+  assert.deepEqual(['일본 엔 (JPY) (100)', 'USD', '미국 달러', '유로 (EUR)', 'KRW', '원', ''].map(FX.normCurrency), ['JPY', 'USD', 'USD', 'EUR', 'KRW', 'KRW', '']);
+  assert.deepEqual(['홍콩 달러 (HKD)', '¥', 'CHF'].map(FX.normCurrency), [null, null, null]);   // ¥ 는 엔·위안 둘 다라 짐작하지 않음
+});
+test('환율 월: 납기월의 전월(기본)·당월, 1월 납기는 전년 12월, 납기일 없으면 빈칸', () => {
+  assert.equal(FX.rateMonth('2026-10-15'), '2026-09');
+  assert.equal(FX.rateMonth('2027-01-05', 'prev'), '2026-12');
+  assert.equal(FX.rateMonth('2026-10-15', 'same'), '2026-10');
+  assert.equal(FX.rateMonth(null), '');
+  assert.deepEqual(['2026.08', 2026.08, 2026.1, '2026년 8월', 202608, '2026-08-01', new Date(2026, 7, 3), '8월'].map(FX.parseMonth), ['2026-08', '2026-08', '2026-10', '2026-08', '2026-08', '2026-08', '2026-08', '']);
+});
+test('원화 단가 = 외화 × 환율, 소수 둘째 자리 반올림(0.005 올림): 12.5 위안 × 190.35 = 2,379.375 → 2,379.38', () => {
+  const R = FX.resolver({ file: { rates: { 'CNY|2026-09': { raw: 190.35, unit: 1, rate: 190.35 } } } });
+  const c = FX.convert(12.5, 'CNY', '2026-10-15', R, 'prev');
+  assert.deepEqual([c.krw, c.raw, c.month, c.src], [2379.38, 190.35, '2026-09', '기준파일']);
+  assert.equal(FX.round2(1.005), 1.01); assert.equal(FX.round2(2.675), 2.68); assert.equal(FX.round2(8856.3), 8856.3);   // 이진 소수 오차(1.00499…)를 걷어냄
+  const J = FX.resolver({ auto: { rates: FX.fromAuto({ currencies: { JPY: { unit: 100, months: { '2026-08': 885.63 } } } }) } });
+  assert.equal(FX.convert(1000, 'JPY', '2026-09-30', J).krw, 8856.3);                 // 1,000엔 × 885.63 ÷ 100
+  assert.deepEqual(FX.convert(12.5, 'CNY', '2026-12-01', R), { missing: true, reason: 'CNY 2026-11 환율 없음', cur: 'CNY', month: '2026-11', orig: 12.5 });
+  assert.match(FX.convert(12.5, 'CNY', null, R).reason, /납기일 없음/);
+  assert.match(FX.convert(12.5, null, '2026-10-01', R).reason, /통화를 알 수 없음/);
+});
+test('환율 기준 파일 — 서울외국환중개 화면 복사 모양(날짜 | 통화명 | 월평균 매매기준율): 엔화 (100), 숫자로 바뀐 2026.1(=10월)', () => {
+  const p = FX.parseRateBook({ names: ['Sheet1'], sheets: { Sheet1: [['월평균 매매기준율'], ['날짜', '통화명', '월평균 매매기준율'],
+    ['2026.08', '위안 (CNH)', '208.69'], [2026.07, '위안 (CNH)', 220.94], [2025.1, '위안 (CNH)', 199.82], ['2026.08', '일본 엔 (JPY) (100)', '885.63'], ['2026.08', '홍콩 달러 (HKD)', '180.00'], ['', '', '']] } });
+  assert.equal(p.layout, 'long');
+  assert.deepEqual([p.stats.pairs, p.stats.bad, p.stats.currencies, p.stats.first, p.stats.last], [4, 1, ['CNY', 'JPY'], '2025-10', '2026-08']);
+  assert.deepEqual([p.rates['CNY|2026-08'].raw, p.rates['CNY|2025-10'].raw, p.rates['JPY|2026-08'].unit, p.rates['JPY|2026-08'].rate], [208.69, 199.82, 100, 8.8563]);
+});
+test('환율 기준 파일 — 회사 양식(연월 | 통화 | 환율(원) | 단위 | 비고) · 가로(연월 | CNY | JPY(100)) · 같은 달 두 값은 위쪽 · 예시 시트는 다른 값이 없을 때만', () => {
+  const co = FX.parseRateBook({ names: ['환율기준', '예시', '안내'], sheets: {
+    '환율기준': [['연월', '통화', '환율(원)', '단위', '비고(출처)'], ['2026-09', 'China(RMB)', 205.1, '', '회사 기준'], ['2026-09', 'RMB', 206, '', '두 번째 — 무시'], ['2026-09', 'JPY', 9.1, 1, '1엔당'], ['2026-13', 'USD', 1400, '', '없는 달']],
+    '예시': [['연월', '통화', '환율(원)'], ['2026-08', 'CNY', 208.69]], '안내': [['설명']] } });
+  assert.deepEqual([co.stats.pairs, co.stats.bad, co.stats.conflicts, co.rates['CNY|2026-09'].raw, co.rates['CNY|2026-09'].note], [2, 1, 1, 205.1, '회사 기준']);
+  assert.deepEqual([co.rates['JPY|2026-09'].unit, co.rates['JPY|2026-09'].rate], [1, 9.1]);
+  assert.equal(co.rates['CNY|2026-08'], undefined);                                      // 「예시」 시트는 읽지 않음
+  assert.match(co.problems[0], /CNY 2026-09 .*205\.1/);
+  const ex = FX.parseRateBook({ names: ['환율기준', '예시'], sheets: { '환율기준': [['연월', '통화', '환율(원)']], '예시': [['연월', '통화', '환율(원)'], ['2026-08', 'CNY', 208.69]] } });
+  assert.equal(ex.rates['CNY|2026-08'].raw, 208.69); assert.ok(ex.problems.some((x) => /예시/.test(x)));
+  const wide = FX.parseRateBook({ names: ['s'], sheets: { s: [['기준월', 'China(RMB)', 'USD', 'JPY(100)'], ['2026-08', 208.69, '1,406.30', 885.63], ['2026-09', '', 1390, '']] } });
+  assert.equal(wide.layout, 'wide');
+  assert.deepEqual([wide.stats.pairs, wide.rates['USD|2026-08'].raw, wide.rates['JPY|2026-08'].unit, wide.rates['USD|2026-09'].raw], [4, 1406.3, 100, 1390]);
+  const pasted = FX.parseRateBook(FX.textBook('날짜\t통화명\t월평균 매매기준율\n2026.08\t위안 (CNH)\t208.69\n'));
+  assert.equal(pasted.rates['CNY|2026-08'].raw, 208.69);
+  const one = FX.parseRateBook({ names: ['CNY 환율'], sheets: { 'CNY 환율': [['연월', '환율'], ['2026-09', 205]] } });   // 통화 칸이 없으면 시트 이름으로
+  assert.equal(one.rates['CNY|2026-09'].raw, 205);
+  assert.match(FX.parseRateBook({ names: ['s'], sheets: { s: [['품번', '수량']] } }).problems[0], /연월/);
+});
+test('찾는 순서: 직접입력 > 기준파일 > 자동, 없으면 null · 적용 환율 시트', () => {
+  const R = FX.resolver({ manual: { 'CNY|2026-09': 200, 'XXX|2026-09': 1 }, file: { file: 'f.xlsx', rates: { 'CNY|2026-09': { raw: 205.1, unit: 1 }, 'CNY|2026-08': { raw: 208, unit: 1 } } },
+    auto: { rates: FX.fromAuto({ currencies: { CNY: { unit: 1, months: { '2026-08': 208.69, '2026-07': 220.94 } } } }) } });
+  assert.deepEqual(['2026-09', '2026-08', '2026-07', '2026-06'].map((m) => { const e = R.find('CNY', m); return e && [e.raw, e.src]; }),
+    [[200, '직접입력'], [208, '기준파일'], [220.94, '자동(서울외국환중개)'], null]);
+  const A = FX.ratesAoa(R, { 'CNY|2026-09': 3 }, [{ cur: 'CNY', month: '2026-11', reason: 'CNY 2026-11 환율 없음', rows: 2 }], { file: 'f.xlsx' });
+  const hi = A.findIndex((r) => r[0] === '통화');
+  assert.deepEqual(A[hi + 1], ['CNY', '2026-09', 200, 1, '직접입력', 200, 205.1, '', 3]);
+  assert.deepEqual(A[A.length - 1], ['CNY', '2026-11', 'CNY 2026-11 환율 없음', 2]);
+});
+test('매입단가표의 통화: 「통화」 칸 · 「12.5 RMB」 값 · 「매입단가(RMB)」 머리, 모르는 통화 행은 건너뜀', () => {
+  const t = P.parseBook({ names: ['s'], sheets: { s: [['품목코드', '매입단가', '통화'], ['A', 12.5, 'China(RMB)'], ['B', '3.5 RMB', ''], ['C', 1000, 'KRW'], ['D', 7, 'HKD'], ['E', 900, '']] } });
+  assert.deepEqual([t.map.A.cur, t.map.B.cur, t.map.B.price, t.map.C.cur, t.map.D, t.map.E.cur], ['CNY', 'CNY', 3.5, undefined, undefined, undefined]);
+  assert.equal(t.stats.badCur, 1);
+  const h = P.parseBook({ names: ['s'], sheets: { s: [['품번', '매입단가(RMB)'], ['A', 12.5]] } });
+  assert.equal(h.map.A.cur, 'CNY');
+});
+// 손으로 계산한 수주 4줄: 기준파일 CNY 2026-09 = 190.35, 자동 USD 2026-08 = 1,406.30
+const FXR = FX.resolver({ file: { rates: { 'CNY|2026-09': { raw: 190.35, unit: 1 } } }, auto: { rates: FX.fromAuto({ currencies: { USD: { unit: 1, months: { '2026-08': 1406.3 } } } }) } });
+const FXT = P.parseBook({ names: ['s'], sheets: { s: [['품목코드', '매입단가', '통화'], ['P1', 12.5, 'China(RMB)'], ['P2', 1000, '원'], ['P3', 40, '']] } });
+const FXROWS = [
+  { item: 'P1', company: 'P1', qty: 100, due: '2026-10-15', price: 3000, currency: 'KRW' },   // 매입 12.5 위안 × 190.35 = 2,379.38 → 237,938
+  { item: 'P1', company: 'P1', qty: 10, due: '2026-12-03', price: 3000 },                      // 2026-11 환율 없음 → 매입금액에서 뺌
+  { item: 'P2', company: 'P2', qty: 5, due: '2026-09-10', price: 2, currency: 'USD' },          // 매입 원화 1,000 · 판매 2 달러 × 1,406.30(2026-08 자동) = 2,812.60
+  { item: 'P3', company: 'P3', qty: 2, due: null, price: null }];                               // 통화 빈칸 → 기본 통화
+test('매입·판매 단가 환산: 외화만 원화로, 환율 없음은 금액에서 빼고 따로 셈(매입단가 없음과 섞지 않음)', () => {
+  const R = P.apply(FXROWS, FXT, {}, { fx: { resolver: FXR, mode: 'prev' } });
+  const [a, b, c, d] = R.rows;
+  assert.deepEqual([a.buyPrice, a.buyAmount, a.buyPriceOrig, a.buyCur, a.buyFx.month, a.buyFx.src], [2379.38, 237938, 12.5, 'CNY', '2026-09', '기준파일']);
+  assert.deepEqual([b.buyPrice, b.buyAmount, b.buyFxMissing.reason, b.buySrc], [null, null, 'CNY 2026-11 환율 없음', '단가표']);
+  assert.deepEqual([c.buyPrice, c.buyCur, c.price, c.priceOrig, c.priceCur, c.saleAmount], [1000, undefined, 2812.6, 2, 'USD', 14063]);
+  assert.deepEqual([d.buyPrice, d.buyCur], [40, undefined]);                                   // 기본 통화 원화
+  assert.deepEqual([R.stats.buyFx, R.stats.buyFxNone, R.stats.buyNone, R.stats.saleFx, R.stats.saleFxNone, R.stats.buyHas], [1, 1, 0, 1, 0, 3]);
+  assert.equal(R.missing.length, 0);                                                          // 환율 없음은 「매입단가 없음」 목록에 넣지 않음
+  assert.deepEqual(R.fxMissing, [{ cur: 'CNY', month: '2026-11', reason: 'CNY 2026-11 환율 없음', rows: 1 }]);
+  assert.deepEqual(R.fxUsed, { 'CNY|2026-09': 1, 'USD|2026-08': 1 });
+  const cny = P.apply(FXROWS, FXT, {}, { defaultCur: 'CNY', fx: { resolver: FXR } });             // 통화 칸 빈 P3 를 위안으로 → 납기일 없음 = 환율 없음
+  assert.match(cny.rows[3].buyFxMissing.reason, /납기일 없음/);
+  const man = P.apply([{ item: 'Q', company: 'Q', qty: 3, due: '2026-10-02' }], null, { Q: 10 }, { manualCur: { Q: 'CNY' }, fx: { resolver: FXR } });
+  assert.deepEqual([man.rows[0].buyPrice, man.rows[0].buySrc, man.rows[0].buyAmount], [1903.5, '직접입력', 5710.5]);   // 10 × 190.35
+  const same = P.apply(FXROWS.slice(0, 1), FXT, {}, { fx: { resolver: FXR, mode: 'same' } });  // 당월: 2026-10 값 없음
+  assert.equal(same.rows[0].buyFxMissing.month, '2026-10');
+  assert.equal(P.apply(FXROWS, FXT, {}).rows[0].buyFxMissing.reason, 'CNY 2026-09 환율 없음'); // 환율 출처를 주지 않으면 짐작하지 않음
+});
+test('월별 수주 vs 매입: 환율 없음 행은 금액에서 빠지고 따로 셈 · 달마다 쓴 환율 · Excel 에 두 열', () => {
+  const R = P.apply(FXROWS, FXT, {}, { fx: { resolver: FXR, mode: 'prev' } });
+  const S = MO.summarize(R.rows);
+  const sep = S.months.find((m) => m.month === '2026-09'), oct = S.months.find((m) => m.month === '2026-10'), dec = S.months.find((m) => m.month === '2026-12');
+  // 9월: 수주 5 × 2,812.60 = 14,063 · 발주 5 × 1,000 = 5,000 → 35.6% / 10월: 수주 100 × 3,000 = 300,000 · 발주 100 × 2,379.38 = 237,938 → 79.3%
+  assert.deepEqual([sep.sale, sep.buy, sep.share], [14063, 5000, 35.6]);
+  assert.deepEqual([oct.sale, oct.buy, oct.share, oct.buyFx0], [300000, 237938, 79.3, 0]);
+  assert.deepEqual(oct.fx.map((f) => [f.cur, f.month, f.raw, f.src, f.rows]), [['CNY', '2026-09', 190.35, '기준파일', 1]]);
+  assert.deepEqual(sep.fx.map((f) => [f.cur, f.month, f.raw, f.src]), [['USD', '2026-08', 1406.3, '자동(서울외국환중개)']]);
+  assert.deepEqual(S.total.fx.map((f) => f.cur + '|' + f.month), ['CNY|2026-09', 'USD|2026-08']);
+  assert.deepEqual([dec.sale, dec.buy, dec.buyFx0, dec.buyNone], [30000, 0, 1, 0]);
+  assert.equal(MO.sentence(dec), '2026-12 수주금액 30,000원 · 발주금액 0원 · 수주금액 대비 발주금액 0.0% (환율 없음 1행)');
+  assert.equal(MO.sentence(oct), '2026-10 수주금액 300,000원 · 발주금액 237,938원 · 수주금액 대비 발주금액 79.3% — 적용 환율 CNY 190.35(2026-09 · 기준파일)');
+  assert.ok(S.hasFx);
+  const A = MO.aoa(S), hi = A.findIndex((r) => r[0] === '납기월' && r[1] === '수주금액');
+  assert.deepEqual(A[hi].slice(-2), ['환율 없음(행)', '적용 환율']);
+  assert.deepEqual(A.find((r) => r[0] === '2026-12').slice(-2), [1, '']);
+  assert.equal(MO.summarize(P.apply(FXROWS.slice(3), FXT, {}).rows).hasFx, false);              // 외화가 없으면 열도 없음
+});
+test('통합 수주 Excel: 원래 통화·값과 환율 내역을 맨 끝 열에', () => {
+  const R = P.apply(FXROWS, FXT, {}, { fx: { resolver: FXR } });
+  const A = I.rowsAoa(R.rows), H = A[0];
+  assert.deepEqual(H.slice(-5), ['판매 통화', '판매단가(원래 값)', '매입 통화', '매입단가(원래 값)', '환율 적용 내역']);
+  assert.deepEqual(A[1].slice(-5), ['', '', 'CNY', 12.5, 'CNY 12.5 × 190.35 = 2379.38원 (2026-09 월평균 · 기준파일)']);
+  assert.equal(A[2][H.indexOf('매입단가 출처')], '환율 없음');
+  assert.deepEqual(A[3].slice(-5, -1), ['USD', 2, '', '']);
+});
+test('서울외국환중개 화면 풀기(scripts/fetch-rates.mjs): 「사이트보안」 글자(d1~d5)를 풀어 연월·통화명·값', () => {
+  const enc = (s, L) => [...s].map((ch) => { const c = ch.charCodeAt(0); return c > 255 ? '%u_' + L + c.toString(16) : '%_' + L + c.toString(16); }).join('');
+  const html = '<caption>월평균 매매기준율 결과 표</caption><tr><th><script>d2(\'' + enc('날짜', 'A') + '\');</script></th></tr>' +
+    '<tr><td><script>d1(\'' + enc('2026', 'Z') + '\');</script>.<script>d1(\'' + enc('08', 'Z') + '\');</script></td><td><script>d2(\'' + enc('위안 (CNH)', 'A') + '\');</script></td><td><script>d3(\'' + enc('208.69', 'B') + '\');</script></td></tr>' +
+    '<tr><td><script>d1(\'' + enc('2026', 'Z') + '\');</script>.<script>d1(\'' + enc('07', 'Z') + '\');</script></td><td><script>d2(\'' + enc('미국 달러 (USD)', 'A') + '\');</script></td><td><script>d3(\'' + enc('1,497.43', 'B') + '\');</script></td></tr></table>';
+  assert.deepEqual(parseTable(html), [{ month: '2026-08', name: '위안 (CNH)', value: 208.69 }, { month: '2026-07', name: '미국 달러 (USD)', value: 1497.43 }]);
+  assert.throws(() => parseTable('<html></html>'), /결과 표/);
+});
+test('자동 값 파일(data/rates.json): 서울외국환중개 월평균 · CNY 칸 = 위안(CNH) · 끝난 달만', () => {
+  const j = JSON.parse(require('node:fs').readFileSync(new URL('../data/rates.json', import.meta.url), 'utf8'));
+  assert.match(j.sourceUrl, /smbs\.biz\/ExRate\/MonAvgStdExRate\.jsp/);
+  assert.equal(j.currencies.CNY.smbsCode, 'CNH'); assert.equal(j.currencies.JPY.unit, 100);
+  const ms = Object.keys(j.currencies.CNY.months).sort();
+  assert.ok(ms.length >= 12 && ms.every((m) => /^\d{4}-\d{2}$/.test(m)));
+  assert.ok(ms[ms.length - 1] < j.fetchedAt.slice(0, 7));                                     // 받은 달(끝나지 않은 달)은 없음
+  assert.equal(j.currencies.CNY.months['2026-08'], 208.69);                                   // 2026-09-30 에 받은 값
+});
+
 console.log(`\n${passed}개 통과`);

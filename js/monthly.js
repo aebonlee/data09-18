@@ -14,6 +14,9 @@
      월 기준은 납기월로 확정(기본). 발주월 선택은 참고용으로 남겨 둡니다.
    월 기준은 납기월(기본·확정) 또는 발주월. 날짜가 없는 줄은 「(납기일 없음)」「(발주일 없음)」 한 칸에 모읍니다.
    입력 행은 SPPrice.apply 를 거친 통합 수주 행(price · buyPrice · qty · due · orderDate · customer · group · company · item · name).
+   2026-09-30 환율(기획서 11.15): 외화 단가는 price.js 에서 원화로 바꾼 값(price · buyPrice)으로 더합니다.
+     환율이 없어 원화로 바꾸지 못한 줄은 금액에서 빠지고 「환율 없음」 행 수(saleFx0 · buyFx0)로 따로 셉니다(단가 없음과 섞지 않음).
+     달마다 쓴 환율(통화 · 환율 월 · 값 · 출처)을 fx 목록으로 모아 화면·Excel 에 함께 보입니다.
    브라우저(window.SPMonthly)와 node(require) 양쪽에서 씁니다. */
 (function (root, factory) {
   var api = factory();
@@ -44,15 +47,20 @@
   function monthLabel(m, by) { return m || NO_DATE[by === 'order' ? 'order' : 'due']; }
 
   function newAgg() {
-    return { rows: 0, qty: 0, sale: 0, saleRows: 0, saleNone: 0, saleNoneQty: 0, buy: 0, buyRows: 0, buyNone: 0, buyNoneQty: 0, bothRows: 0, bothSale: 0, bothBuy: 0 };
+    return { rows: 0, qty: 0, sale: 0, saleRows: 0, saleNone: 0, saleNoneQty: 0, buy: 0, buyRows: 0, buyNone: 0, buyNoneQty: 0, bothRows: 0, bothSale: 0, bothBuy: 0, saleFx0: 0, buyFx0: 0, fxm: {} };
   }
   function add(a, r) {
     var q = Number(r.qty) || 0;
     a.rows++; a.qty += q;
     var hasSale = r.price != null && r.price !== '', hasBuy = r.buyPrice != null && r.buyPrice !== '';
     var s = hasSale ? q * Number(r.price) : 0, b = hasBuy ? q * Number(r.buyPrice) : 0;
-    if (hasSale) { a.sale += s; a.saleRows++; } else { a.saleNone++; a.saleNoneQty += q; }
-    if (hasBuy) { a.buy += b; a.buyRows++; } else { a.buyNone++; a.buyNoneQty += q; }
+    if (hasSale) { a.sale += s; a.saleRows++; } else if (r.saleFxMissing) a.saleFx0++; else { a.saleNone++; a.saleNoneQty += q; }
+    if (hasBuy) { a.buy += b; a.buyRows++; } else if (r.buyFxMissing) a.buyFx0++; else { a.buyNone++; a.buyNoneQty += q; }
+    [r.saleFx, r.buyFx].forEach(function (f) {
+      if (!f || f.missing) return;
+      var k = f.cur + '|' + f.month, e = a.fxm[k] || (a.fxm[k] = { cur: f.cur, month: f.month, raw: f.raw, unit: f.unit, src: f.src, rows: 0 });
+      e.rows++;
+    });
     if (hasSale && hasBuy) { a.bothRows++; a.bothSale += s; a.bothBuy += b; }
   }
   /** 합계를 둥글리고 차액·차익률을 붙입니다 */
@@ -61,6 +69,8 @@
     a.diff = a.bothRows ? round2(a.bothSale - a.bothBuy) : null;
     a.rate = a.bothRows && a.bothSale > 0 ? round1(a.diff / a.bothSale * 100) : null;
     a.share = a.sale > 0 ? round1(a.buy / a.sale * 100) : null;   // 비중 = 발주(매입)금액 ÷ 수주금액 × 100, 모든 줄 합계끼리
+    a.fx = Object.keys(a.fxm || {}).sort().map(function (k) { return a.fxm[k]; });
+    delete a.fxm;
     return a;
   }
   function groupKey(r) { return [str(r.customer) || '(고객사 없음)', str(r.group) || '(구분 없음)'].join(' · '); }
@@ -98,7 +108,7 @@
       var top = items.slice(0, o.topN), rest = items.slice(o.topN);
       if (rest.length) {
         var e = newAgg(); e.key = ''; e.item = '그 밖 ' + rest.length + '품목'; e.customerItem = ''; e.name = ''; e.customers = []; e.rest = rest.length;
-        ['rows', 'qty', 'sale', 'saleRows', 'saleNone', 'saleNoneQty', 'buy', 'buyRows', 'buyNone', 'buyNoneQty', 'bothRows', 'bothSale', 'bothBuy'].forEach(function (k) {
+        ['rows', 'qty', 'sale', 'saleRows', 'saleNone', 'saleNoneQty', 'buy', 'buyRows', 'buyNone', 'buyNoneQty', 'bothRows', 'bothSale', 'bothBuy', 'saleFx0', 'buyFx0'].forEach(function (k) {
           rest.forEach(function (x) { e[k] += x[k]; });
         });
         top.push(finish(e));
@@ -108,7 +118,8 @@
       return finish(T);
     }
     var list = Object.keys(months).sort(function (a, b) { return a === '' ? 1 : b === '' ? -1 : a.localeCompare(b); }).map(function (k) { return close(months[k]); });
-    return { by: o.by, byLabel: BY[o.by], topN: o.topN, months: list, total: close(total) };
+    var T = close(total);
+    return { by: o.by, byLabel: BY[o.by], topN: o.topN, months: list, total: T, hasFx: !!(T.fx.length || T.saleFx0 || T.buyFx0) };
   }
 
   var SHARE_NOTE = '비중 = 발주금액(매입) 합계 ÷ 수주금액 합계 × 100. 단가가 없는 줄은 그쪽 합계에서 빠지므로 「단가 없음」 행 수와 함께 읽어 주세요.';
@@ -117,6 +128,12 @@
   function cells(a) { return [a.rows, a.qty, a.sale, a.saleNone, a.buy, a.buyNone, a.share == null ? '' : a.share, a.bothRows, a.diff == null ? '' : a.diff, a.rate == null ? '' : a.rate]; }
   var TOTAL_HEAD = ['수주금액', '발주금액(매입)', '비중(발주÷수주, %)', '수주단가 없음(행)', '매입단가 없음(행)', '행 수'];
   function totalCells(a) { return [a.sale, a.buy, a.share == null ? '' : a.share, a.saleNone, a.buyNone, a.rows]; }
+  /** 쓴 환율 한 줄 「CNY 208.69(2026-08 · 자동(서울외국환중개))」 — 여럿이면 「, 」 */
+  function fxText(a) {
+    return (a.fx || []).map(function (f) { return f.cur + ' ' + f.raw + (f.unit !== 1 ? '/' + f.unit : '') + '(' + f.month + ' · ' + f.src + ')'; }).join(', ');
+  }
+  var FX_HEAD = ['환율 없음(행)', '적용 환율'];
+  function fxCells(a) { return [a.saleFx0 + a.buyFx0, fxText(a)]; }
   function fmt(v) { return Math.round(v).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
   /** 한 달 한 줄 문장 — 「2026-10 수주금액 2,000원 · 발주금액 980원 · 수주금액 대비 발주금액 49.0%」 (+ 단가 없음 행) */
   function sentence(a) {
@@ -124,7 +141,10 @@
     var miss = [];
     if (a.saleNone) miss.push('수주단가 없음 ' + a.saleNone + '행');
     if (a.buyNone) miss.push('매입단가 없음 ' + a.buyNone + '행');
-    return miss.length ? s + ' (' + miss.join(' · ') + ')' : s;
+    if (a.saleFx0 || a.buyFx0) miss.push('환율 없음 ' + (a.saleFx0 + a.buyFx0) + '행');
+    s = miss.length ? s + ' (' + miss.join(' · ') + ')' : s;
+    var ft = fxText(a);
+    return ft ? s + ' — 적용 환율 ' + ft : s;
   }
 
   /** Excel 시트 「월별 수주 vs 매입」 — 월별 표 · 고객사·구분별 · 품목별(월마다 상위 N) 세 덩어리를 위에서 아래로 */
@@ -134,9 +154,10 @@
     out.push([]);
     out.push(['월별 총금액 비교 — 단가가 없는 줄이 있어도 합계끼리 비교']);
     out.push([SHARE_NOTE]);
-    out.push([sum.byLabel].concat(TOTAL_HEAD));
-    sum.months.forEach(function (m) { out.push([m.label].concat(totalCells(m))); });
-    out.push(['합계'].concat(totalCells(sum.total)));
+    var fx = !!sum.hasFx;   // 외화가 있을 때만 「환율 없음 · 적용 환율」 두 열을 붙임
+    out.push([sum.byLabel].concat(TOTAL_HEAD, fx ? FX_HEAD : []));
+    sum.months.forEach(function (m) { out.push([m.label].concat(totalCells(m), fx ? fxCells(m) : [])); });
+    out.push(['합계'].concat(totalCells(sum.total), fx ? fxCells(sum.total) : []));
     out.push([]);
     out.push(['월별 상세 — 차액·차익률(둘 다 있는 줄)은 보조 정보']);
     out.push([NOTE]);
@@ -164,5 +185,5 @@
     return out;
   }
 
-  return { BY: BY, BY_FIXED: BY_FIXED, NO_DATE: NO_DATE, DEFAULT_TOP: DEFAULT_TOP, NOTE: NOTE, SHARE_NOTE: SHARE_NOTE, sentence: sentence, SHEET: '월별 수주 vs 매입', options: options, monthOf: monthOf, summarize: summarize, aoa: aoa };
+  return { BY: BY, BY_FIXED: BY_FIXED, NO_DATE: NO_DATE, DEFAULT_TOP: DEFAULT_TOP, NOTE: NOTE, SHARE_NOTE: SHARE_NOTE, sentence: sentence, fxText: fxText, SHEET: '월별 수주 vs 매입', options: options, monthOf: monthOf, summarize: summarize, aoa: aoa };
 });

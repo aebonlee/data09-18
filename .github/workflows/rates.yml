@@ -1,0 +1,46 @@
+# 서울외국환중개 월평균 매매기준율을 매일 받아 data/rates.json · data/rates.js 로 넣습니다(기획서 11.15).
+# 값이 바뀐 날(보통 매달 1일 — 지난달 월평균이 새로 나옴)만 커밋합니다.
+# GitHub Pages 는 main 루트를 그대로 서빙하므로, 커밋 뒤 Pages 빌드를 한 번 요청해 새 파일이 바로 올라가게 합니다.
+name: 환율 받기 (서울외국환중개 월평균)
+
+on:
+  schedule:
+    - cron: '10 0 * * *'     # 매일 09:10 (한국 시간)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+
+concurrency:
+  group: rates
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: 월평균 매매기준율 받기
+        run: node scripts/fetch-rates.mjs
+      - name: 바뀌었으면 커밋·푸시
+        id: commit
+        run: |
+          if git diff --quiet -- data/; then
+            echo "변경 없음"; echo "changed=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/rates.json data/rates.js
+          git commit -m "환율 자동 갱신 — 서울외국환중개 월평균 매매기준율"
+          git push
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+      - name: Pages 다시 빌드 요청
+        if: steps.commit.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh api -X POST "repos/${{ github.repository }}/pages/builds" || echo "Pages 빌드 요청 실패 — 다음 푸시 때 반영됩니다"

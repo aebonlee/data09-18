@@ -257,7 +257,7 @@
     function add(f, rep, r, fields) {
       var row = Object.assign({ customer: rep.customer, plant: f.cls.plant || '', group: f.cls.group || '', name: '', orderDate: null, note: '', source: f.name, sheet: rep.sheet, row: r, price: null, currency: '' }, fields);
       if (row.price != null) row.priceSrc = '원본';
-      if (row.currency && !isWon(row.currency)) check(f.name, r, '통화가 원화가 아님', row.item + ' · ' + row.currency + ' — 단가를 그대로 두었습니다(환산하지 않음)');
+      if (row.currency && !isWon(row.currency)) check(f.name, r, '통화가 원화가 아님', row.item + ' · ' + row.currency + ' — 「환율」 화면의 기준(납기월의 전월 평균 등)으로 원화로 바꿔 계산합니다. 원래 값은 통합 수주 Excel 의 「판매단가(원래 값)」 열');
       rows.push(row); rep.collected++;
       return row;
     }
@@ -731,19 +731,27 @@
     '판매단가(고객 발주)', '판매금액', '판매단가 출처', '매입단가(생산처 발주)', '매입금액', '생산처', '매입단가 출처',
     '납기일', '발주일', '원본파일', '원본 시트', '원본 행', '규칙', '비고'];
   var MARGIN_HEAD = ['판매−매입(단가)', '판매−매입(금액)'];
+  // 환율(기획서 11.15) — 맨 끝에 붙임. 원화면 빈칸, 외화면 원래 통화·값과 쓴 환율(또는 「환율 없음」 사유)
+  var FX_HEAD = ['판매 통화', '판매단가(원래 값)', '매입 통화', '매입단가(원래 값)', '환율 적용 내역'];
+  function fxNote(r) {
+    return [r.saleFx || r.saleFxMissing, r.buyFx || r.buyFxMissing].filter(Boolean).map(function (f) {
+      return f.missing ? '환율 없음 — ' + f.reason : f.cur + ' ' + f.orig + ' × ' + f.raw + (f.unit !== 1 ? '/' + f.unit : '') + ' = ' + f.krw + '원 (' + f.month + ' 월평균 · ' + f.src + ')';
+    }).join(' / ');
+  }
   function amountOf(r) { return r.price == null ? null : Math.round(r.qty * r.price * 100) / 100; }
   function buyAmountOf(r) { return r.buyPrice == null ? null : Math.round(r.qty * r.buyPrice * 100) / 100; }
   function blank(v) { return v == null ? '' : v; }
   /** opts.margin = true 면 매입단가 출처 뒤에 「판매−매입」 두 열 */
   function rowsAoa(rows, opts) {
-    var mg = !!(opts && opts.margin), H = HEAD.slice();
+    var mg = !!(opts && opts.margin), H = HEAD.slice().concat(FX_HEAD);
     if (mg) H.splice(H.indexOf('매입단가 출처') + 1, 0, MARGIN_HEAD[0], MARGIN_HEAD[1]);
     return [H].concat(rows.map(function (r) {
       var a = amountOf(r), b = buyAmountOf(r);
       var line = [r.customer, r.plant, r.group, r.item, r.company || r.item, MAP_LABEL[r.mapStatus] || '', r.name, r.qty,
-        blank(r.price), blank(a), r.price == null ? '판매단가 없음' : (r.priceSrc || '원본'),
-        blank(r.buyPrice), blank(b), r.maker || '', r.buyPrice == null ? '매입단가 없음' : (r.buySrc || ''),
-        r.due, r.orderDate || '', r.source, r.sheet || '', r.row, r.rule || '', [r.note, r.priceNote].filter(Boolean).join(' · ')];
+        blank(r.price), blank(a), r.price == null ? (r.saleFxMissing ? '환율 없음' : '판매단가 없음') : (r.priceSrc || '원본'),
+        blank(r.buyPrice), blank(b), r.maker || '', r.buyPrice == null ? (r.buyFxMissing ? '환율 없음' : '매입단가 없음') : (r.buySrc || ''),
+        r.due, r.orderDate || '', r.source, r.sheet || '', r.row, r.rule || '', [r.note, r.priceNote].filter(Boolean).join(' · '),
+        r.priceCur || '', blank(r.priceOrig), r.buyCur || '', blank(r.buyPriceOrig), fxNote(r)];
       if (mg) line.splice(15, 0, blank(r.margin), blank(r.marginAmount));
       return line;
     }));

@@ -14,7 +14,7 @@
 --  본인 프로젝트에 올리는 것을 전제로 하므로 테이블 이름에 접두사를 붙이지 않았습니다.
 --  회사 공용 URL·키는 어디에도 들어 있지 않습니다.
 --
---  테이블 (17개)
+--  테이블 (18개)
 --    app_members        — 팀 구성원과 역할 (admin=생산관리 담당자 / member=구매·물류 담당자, 읽기 전용)
 --    source_file        — 올린 엑셀 한 벌 (dataset: orders 수주 / stock 재고 / shipments 선적예정)
 --    order_line         — 수주현황 한 행 (품번·품명·고객사·수주일·납기일·수주수량)
@@ -39,6 +39,9 @@
 --    intake_order_line 의 buy_price · buy_amount · buy_source · maker — 매입단가(생산처 발주): 당사 → 생산처 발주단가 · 매입금액 · 출처 · 생산처
 --    price_master       — 매입단가표(천일품번 → 매입단가 · 생산처, 2026-09-30 확정)와 화면에서 직접 적은 매입단가. 고객 발주 단가와 무관
 --    intake_monthly_summary (뷰) — 월별 수주 vs 매입(납기월(확정)·발주월 × 수주금액·매입금액·단가 없음 행 수·비중·차액·차익률), 기획서 11.13·11.14
+--    ── 환율 (기획서 11.15, 2026-09-30 China(RMB) 요청) ──
+--    fx_rate            — 월평균 환율(통화 · 연월 · 값 · 단위 · 출처: 직접입력 / 기준파일 / 자동(서울외국환중개))
+--    intake_order_line 의 sale_currency · sale_price_orig · sale_fx_rate · buy_currency · buy_price_orig · buy_fx_rate · fx_month — 외화 단가의 원래 값과 쓴 환율
 --
 --  접근 규칙
 --    · 자료는 올린 사람(owner_id)만 쓰고 고친다.
@@ -334,6 +337,59 @@ do $c$ begin
   end if;
 end $c$;
 
+-- 환율 (기획서 11.15) — 외화(China(RMB) 등) 단가를 원화로 바꾼 기록. js/price.js · js/fx.js 와 같은 규칙.
+--   *_currency   — KRW(원화, 기본) · CNY(China(RMB) — RMB·CNH·위안 모두) · USD · JPY · EUR
+--   *_price_orig — 원래 외화 단가. 원화 줄은 비운다
+--   *_fx_rate    — 쓴 환율(외화 1단위당 원 — 엔화도 1엔당으로 나눈 값). unit_price · buy_price = round(원래 값 × 환율, 2)
+--   fx_month     — 쓴 환율의 연월(납기월의 전월이 기본, 설정으로 당월) — 외화 줄만
+--   환율이 없던 외화 줄: 원래 값만 있고 환율 · 원화 단가 · 출처는 비운다(= 「환율 없음」, 금액에서 뺀다)
+alter table public.intake_order_line add column if not exists sale_currency text not null default 'KRW';
+alter table public.intake_order_line add column if not exists sale_price_orig numeric;
+alter table public.intake_order_line add column if not exists sale_fx_rate numeric;
+alter table public.intake_order_line add column if not exists buy_currency text not null default 'KRW';
+alter table public.intake_order_line add column if not exists buy_price_orig numeric;
+alter table public.intake_order_line add column if not exists buy_fx_rate numeric;
+alter table public.intake_order_line add column if not exists fx_month text not null default '';
+do $c$ begin
+  if not exists (select 1 from pg_constraint where conname = 'intake_order_line_currency_check') then
+    alter table public.intake_order_line add constraint intake_order_line_currency_check
+      check (sale_currency in ('KRW', 'CNY', 'USD', 'JPY', 'EUR') and buy_currency in ('KRW', 'CNY', 'USD', 'JPY', 'EUR')
+             and (fx_month = '' or fx_month ~ '^\d{4}-(0[1-9]|1[0-2])$'));
+  end if;
+  if not exists (select 1 from pg_constraint where conname = 'intake_order_line_sale_fx_check') then
+    alter table public.intake_order_line add constraint intake_order_line_sale_fx_check
+      check ((sale_currency = 'KRW' and sale_price_orig is null and sale_fx_rate is null)
+          or (sale_currency <> 'KRW' and sale_price_orig > 0
+              and ((unit_price is null and sale_fx_rate is null)
+                or (sale_fx_rate > 0 and fx_month <> '' and unit_price = round(sale_price_orig * sale_fx_rate, 2)))));
+  end if;
+  if not exists (select 1 from pg_constraint where conname = 'intake_order_line_buy_fx_check') then
+    alter table public.intake_order_line add constraint intake_order_line_buy_fx_check
+      check ((buy_currency = 'KRW' and buy_price_orig is null and buy_fx_rate is null)
+          or (buy_currency <> 'KRW' and buy_price_orig > 0
+              and ((buy_price is null and buy_fx_rate is null)
+                or (buy_fx_rate > 0 and fx_month <> '' and buy_price = round(buy_price_orig * buy_fx_rate, 2)))));
+  end if;
+end $c$;
+
+-- 월평균 환율 (기획서 11.15) — 찾는 순서: 직접입력 > 기준파일 > 자동(서울외국환중개). 같은 출처 · 통화 · 연월은 한 줄
+--   rate — 고시 값(외화 1단위당 원, 엔화는 100엔당 — unit 100)
+create table if not exists public.fx_rate (
+  id           bigint generated always as identity primary key,
+  owner_id     uuid not null default auth.uid(),
+  currency     text not null check (currency in ('CNY', 'USD', 'JPY', 'EUR')),
+  rate_month   text not null check (rate_month ~ '^\d{4}-(0[1-9]|1[0-2])$'),
+  rate         numeric not null check (rate > 0),
+  unit         int not null default 1 check (unit in (1, 100)),
+  source       text not null check (source in ('직접입력', '기준파일', '자동(서울외국환중개)')),
+  source_file  text not null default '',
+  note         text not null default '',
+  created_at   timestamptz not null default now(),
+  updated_at   timestamptz not null default now(),
+  -- ⚠ upsert 시 onConflict: 'owner_id,source,currency,rate_month'
+  constraint fx_rate_key unique (owner_id, source, currency, rate_month)
+);
+
 -- 월별 수주 vs 매입 (기획서 11.13, 2026-09-30 세 번째 답변의 새 요청 — 화면 「월별 수주 vs 매입」, js/monthly.js 와 같은 계산)
 --   month_basis  — due 납기월 | order 발주월. 날짜가 없는 줄은 month = '' 한 칸
 --   sale_amount  — 수주금액 = 수량 × 판매단가(판매단가 있는 줄만), sale_none = 판매단가 없는 행 수
@@ -344,26 +400,31 @@ create or replace view public.intake_monthly_summary with (security_invoker = tr
 with l as (
   select owner_id, batch_id, customer, kind, qty, due_date, order_date,
          case when unit_price is null then null else coalesce(amount, round(qty * unit_price, 2)) end as sale_amt,
-         case when buy_price is null then null else coalesce(buy_amount, round(qty * buy_price, 2)) end as buy_amt
+         case when buy_price is null then null else coalesce(buy_amount, round(qty * buy_price, 2)) end as buy_amt,
+         (unit_price is null and sale_price_orig is not null) as sale_fx0,   -- 외화인데 환율이 없어 금액에서 뺀 줄(기획서 11.15)
+         (buy_price is null and buy_price_orig is not null)   as buy_fx0
   from public.intake_order_line
 ), m as (
-  select owner_id, batch_id, 'due'::text as month_basis, to_char(due_date, 'YYYY-MM') as month, qty, sale_amt, buy_amt from l
+  select owner_id, batch_id, 'due'::text as month_basis, to_char(due_date, 'YYYY-MM') as month, qty, sale_amt, buy_amt, sale_fx0, buy_fx0 from l
   union all
-  select owner_id, batch_id, 'order'::text, coalesce(to_char(order_date, 'YYYY-MM'), ''), qty, sale_amt, buy_amt from l
+  select owner_id, batch_id, 'order'::text, coalesce(to_char(order_date, 'YYYY-MM'), ''), qty, sale_amt, buy_amt, sale_fx0, buy_fx0 from l
 )
 select owner_id, batch_id, month_basis, month,
        count(*)::int                                                         as row_count,
        sum(qty)                                                              as qty,
        coalesce(sum(sale_amt), 0)                                            as sale_amount,
-       count(*) filter (where sale_amt is null)::int                         as sale_none,
+       count(*) filter (where sale_amt is null and not sale_fx0)::int        as sale_none,
        coalesce(sum(buy_amt), 0)                                             as buy_amount,
-       count(*) filter (where buy_amt is null)::int                          as buy_none,
+       count(*) filter (where buy_amt is null and not buy_fx0)::int          as buy_none,
        count(*) filter (where sale_amt is not null and buy_amt is not null)::int as both_rows,
        sum(sale_amt - buy_amt) filter (where sale_amt is not null and buy_amt is not null) as diff,
        round(sum(sale_amt - buy_amt) filter (where sale_amt is not null and buy_amt is not null) * 100
              / nullif(sum(sale_amt) filter (where sale_amt is not null and buy_amt is not null), 0), 1) as rate,
        -- 비중(기획서 11.14) = 발주(매입)금액 합계 ÷ 수주금액 합계 × 100 — 단가가 한쪽만 있는 줄도 그쪽 합계에 넣음
-       round(coalesce(sum(buy_amt), 0) * 100 / nullif(sum(sale_amt), 0), 1)  as share
+       round(coalesce(sum(buy_amt), 0) * 100 / nullif(sum(sale_amt), 0), 1)  as share,
+       -- 환율 없음(기획서 11.15): 외화인데 그 달 환율이 없어 금액에서 뺀 행 수 — 단가 없음과 따로 센다
+       count(*) filter (where sale_fx0)::int                                 as sale_fx_none,
+       count(*) filter (where buy_fx0)::int                                  as buy_fx_none
 from m
 group by owner_id, batch_id, month_basis, month;
 revoke all on public.intake_monthly_summary from public, anon;
@@ -459,6 +520,15 @@ do $c$ begin
 end $c$;
 alter table public.price_master add column if not exists maker text not null default '';
 create index if not exists price_master_lookup_idx on public.price_master (owner_id, item);
+-- 매입단가표의 통화(기획서 11.15) — 칸은 처음부터 있었다(기본 KRW). 값을 KRW · CNY(China(RMB)) · USD · JPY · EUR 로 좁힌다.
+-- 외화 매입단가는 통합 수주 줄에서 fx_rate 로 원화로 바꾼다(buy_price_orig · buy_fx_rate)
+do $c$ begin
+  if not exists (select 1 from pg_constraint where conname = 'price_master_currency_check') then
+    update public.price_master set currency = 'KRW' where currency not in ('KRW', 'CNY', 'USD', 'JPY', 'EUR');
+    alter table public.price_master add constraint price_master_currency_check
+      check (currency in ('KRW', 'CNY', 'USD', 'JPY', 'EUR'));
+  end if;
+end $c$;
 
 -- ERP 업로드 양식 설정 (upload.js defaultOptions + 넣은 양식의 머리행) — 사용자당 한 행
 create table if not exists public.upload_setting (
@@ -526,7 +596,7 @@ begin
   foreach t in array array['app_members', 'source_file', 'order_line', 'stock_line', 'shipment_line',
                            'column_mapping', 'app_settings', 'plan_edit', 'ai_note',
                            'intake_setting', 'intake_batch', 'intake_order_line', 'intake_file', 'intake_check',
-                           'part_mapping', 'upload_setting', 'price_master']
+                           'part_mapping', 'upload_setting', 'price_master', 'fx_rate']
   loop
     execute format('drop trigger if exists %I on public.%I', t || '_updated_at', t);
     execute format('create trigger %I before update on public.%I for each row execute function public.set_updated_at()',
@@ -557,6 +627,7 @@ alter table public.intake_check      enable row level security;
 alter table public.part_mapping      enable row level security;
 alter table public.upload_setting    enable row level security;
 alter table public.price_master      enable row level security;
+alter table public.fx_rate           enable row level security;
 
 -- 3-1. 팀 구성원 : 본인 행은 본인이 보고, 전체 목록과 등록·변경·해제는 admin 만
 drop policy if exists app_members_select on public.app_members;
@@ -577,7 +648,7 @@ do $rls$
 declare t text;
 begin
   foreach t in array array['source_file', 'column_mapping', 'app_settings', 'plan_edit', 'ai_note',
-                           'intake_setting', 'intake_batch', 'part_mapping', 'upload_setting', 'price_master']
+                           'intake_setting', 'intake_batch', 'part_mapping', 'upload_setting', 'price_master', 'fx_rate']
   loop
     execute format('drop policy if exists %I on public.%I', t || '_select', t);
     execute format('drop policy if exists %I on public.%I', t || '_insert', t);

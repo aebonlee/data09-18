@@ -57,12 +57,12 @@ do $t$ begin
   perform public._assert_eq(
     (select count(*)::int from pg_policy p join pg_class c on c.oid = p.polrelid
       join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public'),
-    70, '두 번 적용해도 정책이 70개 그대로다(단가표 price_master 4개 포함)');
+    74, '두 번 적용해도 정책이 74개 그대로다(단가표 price_master 4개 · 환율 fx_rate 4개 포함)');
   perform public._assert_eq(
     (select count(*)::int from pg_trigger t join pg_class c on c.oid = t.tgrelid
       join pg_namespace n on n.oid = c.relnamespace
       where n.nspname = 'public' and not t.tgisinternal),
-    17, '두 번 적용해도 updated_at 트리거가 17개 그대로다');
+    18, '두 번 적용해도 updated_at 트리거가 18개 그대로다(fx_rate 포함)');
   perform public._assert(public.valid_ship_rule('{"0": null, "1": 2, "2": 2, "3": 2, "4": 4, "5": 3, "6": null}'),
     '원문 입고 규칙(월~수 +2, 목 +4, 금 +3)은 올바른 규칙이다');
   perform public._assert(not public.valid_ship_rule('{"1": 61}'),  '61일 뒤 입고 규칙은 틀린 규칙이다');
@@ -327,6 +327,54 @@ begin
   delete from public.intake_batch where id = v_m;
 end $t$;
 
+do $t$ begin raise notice '[프로젝트] 환율 (기획서 11.15) — 외화 단가 원래 값 · 쓴 환율 · 환율 없음'; end $t$;
+do $t$
+declare v_x bigint;
+begin
+  insert into public.intake_batch (base_date) values ('2026-09-30') returning id into v_x;
+  -- 손으로 계산: 12.5 위안 × 190.35 = 2,379.375 → 2,379.38 원, 수량 100 → 237,938 원 / 1,000엔 × 8.8563(= 885.63 ÷ 100) = 8,856.30
+  insert into public.intake_order_line (batch_id, kind, item, qty, due_date, source_file, source_row, buy_price, buy_amount, buy_source, buy_currency, buy_price_orig, buy_fx_rate, fx_month) values
+    (v_x, '엔진', 'P1', 100, '2026-10-15', 'x.xlsx', '1', 2379.38, 237938, '단가표', 'CNY', 12.5, 190.35, '2026-09'),
+    (v_x, '엔진', 'P2', 1, '2026-10-15', 'x.xlsx', '2', 8856.30, 8856.30, '단가표', 'JPY', 1000, 8.8563, '2026-09'),
+    (v_x, '엔진', 'P1', 10, '2026-12-03', 'x.xlsx', '3', null, null, '', 'CNY', 12.5, null, ''),       -- 2026-11 환율 없음
+    (v_x, '엔진', 'P3', 5, '2026-12-03', 'x.xlsx', '4', null, null, '', 'KRW', null, null, '');        -- 매입단가 없음
+  insert into public.intake_order_line (batch_id, kind, item, qty, due_date, source_file, source_row, unit_price, amount, price_source, sale_currency, sale_price_orig, sale_fx_rate, fx_month) values
+    (v_x, '엔진', 'S1', 5, '2026-09-10', 'x.xlsx', '5', 2812.60, 14063, '원본', 'USD', 2, 1406.30, '2026-08');
+  perform public._assert_raises(format(
+    $q$insert into public.intake_order_line (batch_id, kind, item, qty, due_date, source_file, source_row, buy_price, buy_amount, buy_source, buy_currency, buy_price_orig, buy_fx_rate, fx_month) values (%s, '엔진', 'X', 1, '2026-10-01', 'x', '90', 2379.37, 2379.37, '단가표', 'CNY', 12.5, 190.35, '2026-09')$q$, v_x),
+    '23514', '원화 단가는 round(원래 값 × 환율, 2) 여야 한다(2,379.37 은 틀림 — 0.005 는 올림)');
+  perform public._assert_raises(format(
+    $q$insert into public.intake_order_line (batch_id, kind, item, qty, due_date, source_file, source_row, buy_price, buy_source, buy_price_orig) values (%s, '엔진', 'X', 1, '2026-10-01', 'x', '91', 100, '단가표', 100)$q$, v_x),
+    '23514', '원화 줄에는 원래 외화 값을 두지 않는다');
+  perform public._assert_raises(format(
+    $q$insert into public.intake_order_line (batch_id, kind, item, qty, due_date, source_file, source_row, buy_price, buy_source, buy_currency, buy_price_orig, buy_fx_rate) values (%s, '엔진', 'X', 1, '2026-10-01', 'x', '92', 1903.5, '직접입력', 'CNY', 10, 190.35)$q$, v_x),
+    '23514', '환율을 썼으면 환율 월이 있어야 한다');
+  perform public._assert_raises(format(
+    $q$insert into public.intake_order_line (batch_id, kind, item, qty, due_date, source_file, source_row, buy_currency) values (%s, '엔진', 'X', 1, '2026-10-01', 'x', '93', 'HKD')$q$, v_x),
+    '23514', '통화는 KRW·CNY·USD·JPY·EUR 만');
+  perform public._assert_eq((select array[row_count, buy_none, buy_fx_none, sale_fx_none]::int[] from public.intake_monthly_summary where batch_id = v_x and month_basis = 'due' and month = '2026-12'),
+    array[2, 1, 1, 0], '12월: 환율 없음 1행은 매입단가 없음 1행과 따로 센다');
+  perform public._assert_eq((select array[buy_amount] from public.intake_monthly_summary where batch_id = v_x and month_basis = 'due' and month = '2026-10'),
+    array[246794.30]::numeric[], '10월 매입금액 = 237,938 + 8,856.30(원화로 바꾼 값)');
+  perform public._assert_eq((select sale_amount from public.intake_monthly_summary where batch_id = v_x and month_basis = 'due' and month = '2026-09'),
+    14063::numeric, '9월 수주금액 = 5 × 2,812.60(2 달러 × 1,406.30)');
+  -- 환율 표
+  insert into public.fx_rate (currency, rate_month, rate, unit, source, source_file) values
+    ('CNY', '2026-09', 190.35, 1, '기준파일', '환율기준.xlsx'),
+    ('CNY', '2026-09', 205.10, 1, '직접입력', ''),
+    ('JPY', '2026-08', 885.63, 100, '자동(서울외국환중개)', '');
+  perform public._assert_raises($q$insert into public.fx_rate (currency, rate_month, rate, source) values ('CNY', '2026-09', 191, '기준파일')$q$,
+    '23505', '같은 출처 · 통화 · 연월은 한 줄(upsert onConflict owner_id,source,currency,rate_month)');
+  perform public._assert_raises($q$insert into public.fx_rate (currency, rate_month, rate, source) values ('CNY', '2026-13', 191, '기준파일')$q$, '23514', '연월은 01~12월만');
+  perform public._assert_raises($q$insert into public.fx_rate (currency, rate_month, rate, unit, source) values ('JPY', '2026-09', 8.8, 10, '기준파일')$q$, '23514', '단위는 1 또는 100');
+  perform public._assert_raises($q$insert into public.fx_rate (currency, rate_month, rate, source) values ('CNY', '2026-09', 191, '짐작')$q$, '23514', '출처는 직접입력·기준파일·자동만');
+  perform public._assert_raises($q$insert into public.fx_rate (currency, rate_month, rate, source) values ('CNY', '2026-10', 0, '기준파일')$q$, '23514', '환율은 양수만');
+  perform public._assert_raises($q$insert into public.price_master (item, unit_price, currency) values ('FX1', 12.5, 'HKD')$q$, '23514', '매입단가표 통화는 KRW·CNY·USD·JPY·EUR 만');
+  insert into public.price_master (item, unit_price, currency) values ('FX1', 12.5, 'CNY');
+  delete from public.price_master where item = 'FX1';
+  delete from public.intake_batch where id = v_x;
+end $t$;
+
 do $t$ begin raise notice '[프로젝트] 기록성 표(shipment_plan_log)'; end $t$;
 do $t$ begin
   perform public._assert_rows('update public.shipment_plan_log set qty = 0',
@@ -350,7 +398,7 @@ begin
   foreach t in array array['app_members', 'source_file', 'order_line', 'stock_line', 'shipment_line',
                            'column_mapping', 'app_settings', 'plan_edit', 'ai_note', 'shipment_plan_log',
                            'intake_setting', 'intake_batch', 'intake_order_line', 'intake_file', 'intake_check',
-                           'part_mapping', 'upload_setting', 'price_master']
+                           'part_mapping', 'upload_setting', 'price_master', 'fx_rate']
   loop
     perform public._assert_rows(format('select 1 from public.%I', t), 0, 'B 에게 A 의 ' || t || ' 가 안 보인다');
   end loop;
@@ -426,7 +474,7 @@ begin
   foreach t in array array['app_members', 'source_file', 'order_line', 'stock_line', 'shipment_line',
                            'column_mapping', 'app_settings', 'plan_edit', 'ai_note', 'shipment_plan_log',
                            'intake_setting', 'intake_batch', 'intake_order_line', 'intake_file', 'intake_check',
-                           'part_mapping', 'upload_setting', 'price_master']
+                           'part_mapping', 'upload_setting', 'price_master', 'fx_rate']
   loop
     perform public._assert_rows(format('select 1 from public.%I', t), 0, 'anon 에게 ' || t || ' 가 안 보인다');
   end loop;
@@ -480,6 +528,7 @@ delete from public.intake_batch;
 delete from public.intake_setting;
 delete from public.part_mapping;
 delete from public.price_master;
+delete from public.fx_rate;
 delete from public.upload_setting;
 delete from public.shipment_plan_log;
 delete from public.ai_note;

@@ -8,6 +8,15 @@
   var st = S.load();
   var partMap = S.loadMapping(); // 고객사 품번 → 천일품번 매핑표(이 브라우저에만 저장, 기획서 11.10)
   var priceTable = S.loadPriceTable(); // 매입단가표 당사 품목코드 → 매입단가·생산처(이 브라우저에만 저장, 기획서 11.12)
+  var Fx = window.SPFx;
+  var fxFile = S.loadFxFile();         // 불러온 환율 기준 파일(이 브라우저에만 저장, 기획서 11.15)
+  var autoRates = window.SPRates || null; // data/rates.js — 서울외국환중개 월평균(GitHub Actions 가 매일 갱신). 못 읽으면 null
+  var autoTable = autoRates ? Fx.fromAuto(autoRates) : {};
+  /** 환율 찾기: 직접입력 > 기준파일 > 자동 */
+  function fxR() {
+    return Fx.resolver({ manual: st.fx.manual, file: fxFile, auto: st.fx.useAuto ? { rates: autoTable } : null });
+  }
+  function fxInfo() { return { mode: st.fx.mode, file: fxFile ? fxFile.file : '', fetchedAt: autoRates && st.fx.useAuto ? autoRates.fetchedAt : '' }; }
   var pendingSheets = { orders: null, stock: null, shipments: null }; // 방금 연 파일의 시트들(시트 바꾸기용, 저장 안 함)
   var main = document.getElementById('main');
 
@@ -70,7 +79,7 @@
     reader.onload = function () {
       try {
         var buf = new Uint8Array(reader.result), wb;
-        if (/\.csv$/i.test(file.name)) {
+        if (/\.(csv|txt)$/i.test(file.name)) {
           var text;
           try { text = new TextDecoder('utf-8', { fatal: true }).decode(buf); }
           catch (e) { text = new TextDecoder('euc-kr').decode(buf); } // 엑셀에서 저장한 한글 CSV
@@ -449,7 +458,7 @@
       h('hr', { style: 'border:none;border-top:1px solid var(--line);margin:16px 0' }),
       h('button', { type: 'button', class: 'btn btn-danger', onclick: function () {
         if (!window.confirm('불러온 자료·설정·선적계획 수정·AI 답·수주 취합 결과·품번 매핑표·업로드 양식 설정을 모두 지웁니다. 계속할까요?')) return;
-        S.clear(); S.clearMapping(); S.clearPriceTable(); partMap = null; priceTable = null; st = S.empty(); intakeFiles = null; intakeSide = { stock: null, shipments: null }; save(); render(); toast('모두 지웠습니다');
+        S.clear(); S.clearMapping(); S.clearPriceTable(); S.clearFxFile(); fxFile = null; partMap = null; priceTable = null; st = S.empty(); intakeFiles = null; intakeSide = { stock: null, shipments: null }; save(); render(); toast('모두 지웠습니다');
       } }, '모두 지우기')));
   }
   function datasetCard(k) {
@@ -671,7 +680,8 @@
     if (!st.intake) return null;
     var mi = M.apply(st.intake.rows, partMap, st.mapOpts);
     // 판매단가(고객 발주, 참고)는 원본 그대로, 매입단가(생산처 발주, 기획서 11.12)는 매입단가표 → 직접입력. 바꾸면 바로 반영
-    mi.price = Pr.apply(mi.rows, priceTable, st.manualBuy);
+    // 외화 단가는 환율(기획서 11.15)로 원화로 바꿈: 직접입력 > 환율 기준 파일 > 자동(서울외국환중개), 납기월의 전월(설정) 평균
+    mi.price = Pr.apply(mi.rows, priceTable, st.manualBuy, { defaultCur: st.fx.defaultCur, manualCur: st.manualBuyCur, fx: { resolver: fxR(), mode: st.fx.mode } });
     mi.rows = mi.price.rows;
     return mi;
   }
@@ -824,6 +834,7 @@
           var cl = M.conflictList(partMap, st.intake.rows);
           if (cl.length) sheets['매핑충돌'] = M.conflictAoa(cl);
           sheets[Mo.SHEET] = Mo.aoa(Mo.summarize(mi.rows, st.monthlyOpts), Pr.multiList(priceTable, mi.rows));
+          sheets['적용 환율'] = Fx.ratesAoa(fxR(), mi.price.fxUsed, mi.price.fxMissing, fxInfo());
           writeXlsx(sheets, '수주취합_' + r.base + (r.sample ? '_예시데이터' : '') + '.xlsx');
         } }, '통합 수주 Excel 내려받기'),
         h('button', { type: 'button', class: 'btn', onclick: exportUpload, disabled: r.rows.length ? null : true }, '업로드 양식으로 내보내기'),
@@ -884,8 +895,8 @@
           return h('tr', null, h('td', null, x.customer), h('td', null, x.plant), h('td', null, x.group), h('td', { class: 'nowrap' }, x.item),
             h('td', { class: 'nowrap' }, h('strong', null, x.company), x.mapStatus === 'unmapped' || x.mapStatus === 'conflict' ? h('span', { class: 'tag warn' }, M.STATUS_LABEL[x.mapStatus]) : x.mapChosen ? h('span', { class: 'tag' }, '충돌에서 고름') : null),
             h('td', { class: 'num' }, n(x.qty)),
-            h('td', { class: 'num nowrap note' }, x.price == null ? '' : [n(x.price), x.priceSrc && x.priceSrc !== '원본' ? h('span', { class: 'tag' }, x.priceSrc) : null]),
-            h('td', { class: 'num nowrap' }, x.buyPrice == null ? h('span', { class: 'tag warn' }, '매입단가 없음') : [n(x.buyPrice), x.buySrc === '직접입력' ? h('span', { class: 'tag' }, '직접입력') : null, x.buyMulti ? h('span', { class: 'tag', title: '매입단가표에 이 품목 단가가 둘 이상 — 가장 위쪽 단가(확정)' }, '단가 여럿·위쪽') : null]),
+            h('td', { class: 'num nowrap note' }, x.price == null ? (x.saleFxMissing ? h('span', { class: 'tag warn', title: x.saleFxMissing.reason }, x.priceCur + ' ' + x.priceOrig + ' · 환율 없음') : '') : [n(x.price), x.priceSrc && x.priceSrc !== '원본' ? h('span', { class: 'tag' }, x.priceSrc) : null, x.saleFx ? h('span', { class: 'tag', title: Fx.describe(x.saleFx) }, x.saleFx.cur + ' ' + x.saleFx.orig) : null]),
+            h('td', { class: 'num nowrap' }, x.buyFxMissing ? h('span', { class: 'tag warn', title: x.buyFxMissing.reason }, x.buyCur + ' ' + x.buyPriceOrig + ' · 환율 없음') : x.buyPrice == null ? h('span', { class: 'tag warn' }, '매입단가 없음') : [n(x.buyPrice), x.buyFx ? h('span', { class: 'tag', title: Fx.describe(x.buyFx) }, x.buyFx.cur + ' ' + x.buyFx.orig + ' × ' + x.buyFx.raw + (x.buyFx.unit !== 1 ? '/' + x.buyFx.unit : '')) : null, x.buySrc === '직접입력' ? h('span', { class: 'tag' }, '직접입력') : null, x.buyMulti ? h('span', { class: 'tag', title: '매입단가표에 이 품목 단가가 둘 이상 — 가장 위쪽 단가(확정)' }, '단가 여럿·위쪽') : null]),
             h('td', null, x.maker || ''),
             h('td', { class: 'num' }, x.buyAmount == null ? '' : n(x.buyAmount)),
             st.showMargin ? h('td', { class: 'num nowrap' }, x.margin == null ? '' : x.margin < 0 ? h('span', { class: 'tag warn' }, n(x.margin)) : n(x.margin)) : null,
@@ -968,6 +979,19 @@
       if (x && x > 0) m[k] = x; else delete m[k];
       st.manualBuy = m; save(); render();
     }
+    function curSelect(value, onchange, aria) {
+      var sel = h('select', { 'aria-label': aria, onchange: function () { onchange(sel.value); } },
+        ['KRW', 'CNY', 'USD', 'JPY', 'EUR'].map(function (c) { return h('option', { value: c }, c === 'KRW' ? '원화(KRW)' : c === 'CNY' ? 'China(RMB)' : c); }));
+      sel.value = value || 'KRW';
+      return sel;
+    }
+    var defSel = curSelect(st.fx.defaultCur, function (v) { st.fx = Object.assign({}, st.fx, { defaultCur: v }); save(); render(); }, '통화가 적히지 않은 매입단가의 통화');
+    var fxLine = (ps.buyFx || ps.buyFxNone || ps.saleFx || ps.saleFxNone)
+      ? h('p', { class: ps.buyFxNone || ps.saleFxNone ? 'alert warn' : 'note' }, h('strong', null, '외화 단가: '),
+        '매입 ' + n(ps.buyFx) + '행 · 판매 ' + n(ps.saleFx) + '행을 원화로 바꿨습니다(납기월의 ' + (st.fx.mode === 'same' ? '당월' : '전월') + ' 월평균).',
+        ps.buyFxNone || ps.saleFxNone ? ' 환율이 없어 금액에서 뺀 줄: 매입 ' + n(ps.buyFxNone) + '행 · 판매 ' + n(ps.saleFxNone) + '행 (' + mi.price.fxMissing.map(function (m) { return m.cur + ' ' + (m.month || '') + ' ' + m.rows + '행'; }).join(', ') + ') — ' : ' ',
+        h('a', { href: '#/fx' }, '환율 화면에서 기준 파일 불러오기 · 직접 입력'))
+      : null;
     var t = priceTable;
     var tableInfo = Pr.has(t)
       ? h('p', { class: 'note' }, '넣은 매입단가표: ' + (t.file || '') + ' — 품목 ' + n(t.stats.pairs) + '개' + (t.stats.makers ? ' · 생산처 ' + n(t.stats.makers) + '곳' : '') + (t.stats.blank ? ' · 빈 칸 ' + n(t.stats.blank) + '행' : '') + (t.stats.bad ? ' · 숫자가 아닌 단가 ' + n(t.stats.bad) + '행' : '') + (t.stats.conflicts ? ' · 같은 품목에 단가·생산처가 둘 이상 ' + n(t.stats.conflicts) + '건(가장 위쪽 단가 — 확정)' : '') + (ps.manualShadowed ? ' · 직접 적은 값 중 ' + n(ps.manualShadowed) + '개는 이제 단가표 값을 씀' : ''))
@@ -992,6 +1016,10 @@
             S.savePriceTable(priceTable); render(); toast('예시 매입단가표를 넣었습니다 — 실제 단가표를 넣으면 바뀝니다');
           } }, '예시 매입단가표로 해 보기')),
         h('label', { class: 'check field' }, mg, h('span', null, '판매 − 매입 차이 보기'), h('small', null, '통합 수주 표와 Excel 에 「판매−매입」 열을 붙입니다(둘 다 있는 줄만).'))),
+      h('div', { class: 'form-grid' },
+        h('label', { class: 'field' }, h('span', null, '통화가 적히지 않은 매입단가의 통화'), defSel,
+          h('small', null, '매입단가표에 「통화」 칸이 있거나 값이 「12.5 RMB」처럼 적혀 있으면 그 통화로 읽습니다. 칸이 없는 단가표가 모두 위안이면 China(RMB) 를 고르세요. 외화는 ', h('a', { href: '#/fx' }, '환율'), ' 화면의 기준으로 원화로 바꿉니다.'))),
+      fxLine,
       tableInfo, conflictBox,
       st.showMargin ? h('p', { class: ps.negative ? 'alert warn' : 'note' }, '판매 − 매입: 두 단가가 모두 있는 ' + n(ps.both) + '행, 차이 금액 합계 ' + n(Math.round(ps.marginAmount)) + (ps.negative ? ' · 매입단가가 판매단가보다 높은 줄 ' + n(ps.negative) + '행(' + n(ps.negativeItems) + '품목) — 표에 빨간 표시' : '')) : null,
       Pr.has(t) ? h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn btn-danger', onclick: function () {
@@ -999,11 +1027,12 @@
         S.clearPriceTable(); priceTable = null; render(); toast('매입단가표를 지웠습니다');
       } }, '매입단가표 지우기')) : null,
       miss.length ? h('div', { class: 'table-wrap', style: 'margin-top:12px' }, h('table', { class: 'list' },
-        h('thead', null, h('tr', null, ['품목코드', '고객사 품번', '고객사 · 구분', '행 수', '수량', '매입단가 직접입력'].map(function (x, i) { return h('th', { class: i === 3 || i === 4 ? 'num' : null }, x); }))),
+        h('thead', null, h('tr', null, ['품목코드', '고객사 품번', '고객사 · 구분', '행 수', '수량', '매입단가 직접입력', '통화'].map(function (x, i) { return h('th', { class: i === 3 || i === 4 ? 'num' : null }, x); }))),
         h('tbody', null, miss.slice(0, LIM).map(function (m) {
           var inp = h('input', { type: 'text', inputmode: 'decimal', value: st.manualBuy[m.key] == null ? '' : String(st.manualBuy[m.key]), 'aria-label': m.item + ' 매입단가', style: 'max-width:120px', onchange: function () { setManual(m.key, inp.value); } });
+          var cs = curSelect(st.manualBuyCur[m.key] || st.fx.defaultCur, function (v) { var c = Object.assign({}, st.manualBuyCur); c[m.key] = v; st.manualBuyCur = c; save(); render(); }, m.item + ' 매입단가 통화');
           return h('tr', null, h('td', { class: 'nowrap' }, h('strong', null, m.item)), h('td', { class: 'nowrap' }, m.customerItem !== m.item ? m.customerItem : ''),
-            h('td', null, m.customers.join(', ') + (m.group ? ' · ' + m.group : '')), h('td', { class: 'num' }, n(m.rows)), h('td', { class: 'num' }, n(m.qty)), h('td', null, inp));
+            h('td', null, m.customers.join(', ') + (m.group ? ' · ' + m.group : '')), h('td', { class: 'num' }, n(m.rows)), h('td', { class: 'num' }, n(m.qty)), h('td', null, inp), h('td', null, cs));
         }))))
         : h('p', { class: 'note' }, '모든 줄에 매입단가가 있습니다.'),
       miss.length > LIM ? h('p', { class: 'note' }, '화면에는 수량이 큰 ' + LIM + '품목만 보입니다 — 전체는 Excel 의 「매입단가없음」 시트로 확인해 주세요') : null,
@@ -1184,6 +1213,7 @@
     function rate(v) { return v == null ? '-' : v.toFixed(1) + '%'; }
     function download() {
       var sheets = {}; sheets[Mo.SHEET] = Mo.aoa(S, multi);
+      if (S.hasFx) sheets['적용 환율'] = Fx.ratesAoa(fxR(), mi.price.fxUsed, mi.price.fxMissing, fxInfo());
       writeXlsx(sheets, '월별수주vs매입_' + r.base + (r.sample ? '_예시데이터' : '') + '.xlsx');
     }
     main.appendChild(h('div', { class: 'card' },
@@ -1200,11 +1230,14 @@
       h('div', { class: 'kpi' }, h('div', { class: 'k' }, '비중(발주 ÷ 수주)'), h('div', { class: 'v' }, rate(T.share)), h('div', { class: 's' }, '수주금액 대비 발주금액 — 합계끼리')),
       h('div', { class: 'kpi' + (T.saleNone ? ' alert-kpi' : '') }, h('div', { class: 'k' }, '수주단가 없음'), h('div', { class: 'v' }, n(T.saleNone) + '행'), h('div', { class: 's' }, '수량 ' + n(T.saleNoneQty) + ' — 수주금액에 빠짐')),
       h('div', { class: 'kpi' + (T.buyNone ? ' alert-kpi' : '') }, h('div', { class: 'k' }, '매입단가 없음'), h('div', { class: 'v' }, n(T.buyNone) + '행'), h('div', { class: 's' }, '수량 ' + n(T.buyNoneQty) + ' — 발주금액에 빠짐')),
+      S.hasFx ? h('a', { class: 'kpi kpi-btn' + (T.saleFx0 + T.buyFx0 ? ' alert-kpi' : ''), href: '#/fx' }, h('div', { class: 'k' }, '외화 → 원화(환율)'), h('div', { class: 'v' }, T.saleFx0 + T.buyFx0 ? '환율 없음 ' + n(T.saleFx0 + T.buyFx0) + '행' : '모두 환산'),
+        h('div', { class: 's' }, (Mo.fxText(T) || '쓴 환율 없음') + (T.saleFx0 + T.buyFx0 ? ' — 금액에서 뺌' : ''))) : null,
       h('div', { class: 'kpi' + (T.diff != null && T.diff < 0 ? ' alert-kpi' : '') }, h('div', { class: 'k' }, '보조: 차액 · 차익률'), h('div', { class: 'v' }, won(T.diff)), h('div', { class: 's' }, '둘 다 있는 ' + n(T.bothRows) + '행 · 차익률 ' + rate(T.rate)))));
     main.appendChild(h('div', { class: 'card', id: 'monthly-share' }, h('h2', null, '납기월별 총금액 비교'),
       h('ul', { class: 'share-lines' }, S.months.map(function (m) { return h('li', null, Mo.sentence(m)); }),
         h('li', null, h('strong', null, Mo.sentence(Object.assign({}, T, { label: '전체 기간' }))))),
-      h('p', { class: 'note' }, Mo.SHARE_NOTE)));
+      h('p', { class: 'note' }, Mo.SHARE_NOTE),
+      S.hasFx ? h('p', { class: 'note' }, '외화 단가는 줄마다 납기월의 ' + (st.fx.mode === 'same' ? '당월' : '전월') + ' 월평균 환율(서울외국환중개 매매기준율 — 직접입력 > 기준파일 > 자동 순서)로 원화로 바꿨습니다. 「적용 환율」은 그 달 줄에 쓴 통화 · 환율 월 · 값 · 출처입니다. 환율이 없는 줄은 금액에서 빠지고 「환율 없음」으로 셉니다. ', h('a', { href: '#/fx' }, '환율 화면')) : null));
     if (multi.length) main.appendChild(h('details', { class: 'card', id: 'monthly-multi' },
       h('summary', null, '매입단가표에 단가가 둘 이상인 품목 ' + n(multi.length) + '개 — 가장 위쪽 단가로 계산(확정)'),
       h('p', { class: 'note' }, '생산처 이원화로 한 품번에 단가가 여럿인 경우 매입단가표의 가장 위쪽 행 단가를 씁니다(2026-09-30 답변: 1개월 안에 품번별 생산처 1곳으로 정리 예정). 목록은 Excel 시트 끝에도 들어갑니다.'),
@@ -1252,9 +1285,137 @@
       h('p', { class: 'note' }, '품목은 천일품번(매핑 없으면 고객사 원품번)으로 묶습니다. 매입단가 없는 품목은 수주 취합 화면에서 단가표 양식으로 내려받아 채울 수 있습니다.')));
   }
 
+  // ── 환율 (기획서 11.15) ─────────────────────────────────
+  // 외화(China(RMB) 등) 단가를 원화로: 환율 기준 파일 불러오기(먼저 쓰는 방법) · 직접 입력 · 자동(서울외국환중개)
+  function readFxBook(book, name) {
+    var p = Fx.parseRateBook(book, name);
+    if (!p.stats.pairs) { toast(p.problems[0] || '환율 기준 파일에서 읽은 환율이 없습니다', true); return; }
+    fxFile = Object.assign(p, { file: name, at: new Date().toISOString() });
+    S.saveFxFile(fxFile); render();
+    toast('환율 기준을 읽었습니다 — ' + p.stats.currencies.join('·') + ' ' + n(p.stats.pairs) + '개(' + p.stats.first + ' ~ ' + p.stats.last + ')' + (p.stats.bad ? ' · 못 읽은 행 ' + p.stats.bad : ''));
+  }
+  function viewFx() {
+    main.appendChild(h('div', { class: 'page-head' }, h('h1', null, '환율 — 외화 단가를 원화로')));
+    main.appendChild(h('div', { class: 'alert info' },
+      '매입단가(생산처 발주)나 고객 발주 단가의 통화가 China(RMB) 같은 외화이면, 줄마다 납기월의 ',
+      h('strong', null, st.fx.mode === 'same' ? '당월' : '전월'), ' 월평균 환율(서울외국환중개 매매기준율)로 원화 단가를 계산합니다. 예: 납기 2026-10-15 → 2026-09 월평균. ',
+      '환율은 ① 직접 입력 ② 불러온 환율 기준 파일 ③ 자동 값(서울외국환중개에서 매일 받아 둔 값) 순서로 찾고, 어디에도 없는 달은 짐작하지 않고 「환율 없음」으로 표시해 금액에서 뺍니다.'));
+
+    // 1. 기준 파일
+    var input = h('input', { type: 'file', accept: '.xlsx,.xls,.csv,.txt', 'aria-label': '환율 기준 파일' });
+    input.addEventListener('change', function () {
+      var f = input.files[0]; if (!f) return;
+      readFile(f, function (err, book) { if (err) { toast('환율 기준 파일을 읽지 못했습니다: ' + (err.message || err), true); return; } readFxBook(book, f.name); });
+    });
+    var paste = h('textarea', { rows: '5', placeholder: '서울외국환중개 「월평균 매매기준율」 표를 드래그해 복사한 뒤 여기에 붙여 넣어도 됩니다.\n예)\n날짜\t통화명\t월평균 매매기준율\n2026.08\t위안 (CNH)\t208.69', 'aria-label': '환율 표 붙여넣기', style: 'width:100%' });
+    var info = fxFile
+      ? h('div', null, h('p', null, h('strong', null, '불러온 기준: '), fxFile.file + ' — ' + fxFile.stats.currencies.join(' · ') + ' ' + n(fxFile.stats.pairs) + '개 (' + fxFile.stats.first + ' ~ ' + fxFile.stats.last + ')' + (fxFile.stats.bad ? ' · 못 읽은 행 ' + n(fxFile.stats.bad) : '') + ' · ' + String(fxFile.at || '').slice(0, 16).replace('T', ' ')),
+          (fxFile.problems || []).length ? h('ul', { class: 'note' }, fxFile.problems.slice(0, 10).map(function (p) { return h('li', null, p); })) : null)
+      : h('p', { class: 'note' }, '불러온 기준 파일이 없습니다.');
+    main.appendChild(h('div', { class: 'card' }, h('h2', null, '1. 환율 기준 파일 불러오기'),
+      h('p', { class: 'note' }, '회사에서 쓰는 환율 기준 파일(Excel·CSV)을 넣습니다. 읽는 모양은 두 가지입니다 — 세로: 「연월 | 통화 | 환율(원) | 단위 | 비고」(서울외국환중개 화면의 「날짜 | 통화명 | 월평균 매매기준율」도 그대로 읽음), 가로: 「연월 | CNY | USD | JPY(100) …」. 통화는 China(RMB) · RMB · CNY · CNH · 위안을 모두 위안으로 읽습니다. 엔화는 100엔당 값입니다(「단위」 칸에 1 을 적으면 1엔당). 다시 넣으면 새 파일로 바뀝니다. 이 브라우저에만 저장합니다.'),
+      h('div', { class: 'form-grid' },
+        h('label', { class: 'field' }, h('span', null, fxFile ? '환율 기준 파일 다시 넣기(바꾸기)' : '환율 기준 파일 넣기'), input,
+          h('small', null, '양식: ', h('a', { href: 'samples/환율/환율기준_양식.xlsx', download: '' }, '환율기준_양식.xlsx'), '(빈 양식 + 예시 시트) · ', h('a', { href: 'samples/환율/환율기준_서울외국환중개_복사형식_예시.csv', download: '' }, '서울외국환중개 복사 형식 예시(CSV)'), ' · 원본: ', h('a', { href: 'http://www.smbs.biz/ExRate/MonAvgStdExRate.jsp', target: '_blank', rel: 'noopener' }, '서울외국환중개 월평균 매매기준율'))),
+        h('label', { class: 'field' }, h('span', null, '표 붙여넣기'), paste,
+          h('button', { type: 'button', class: 'btn', style: 'margin-top:6px', onclick: function () { if (!paste.value.trim()) { toast('붙여 넣은 내용이 없습니다', true); return; } readFxBook(Fx.textBook(paste.value), '붙여넣기'); } }, '붙여 넣은 표 읽기'))),
+      info,
+      h('div', { class: 'btn-row' },
+        h('button', { type: 'button', class: 'btn', onclick: function () { writeXlsx({ '환율기준': Fx.templateAoa() }, '환율기준_양식.xlsx'); } }, '빈 양식 내려받기'),
+        fxFile ? h('button', { type: 'button', class: 'btn btn-danger', onclick: function () {
+          if (!window.confirm('불러온 환율 기준을 지웁니다. 계속할까요?')) return;
+          S.clearFxFile(); fxFile = null; render(); toast('환율 기준을 지웠습니다');
+        } }, '불러온 기준 지우기') : null)));
+
+    // 2. 설정
+    var modeSel = h('select', { 'aria-label': '환율 월', onchange: function () { st.fx = Object.assign({}, st.fx, { mode: modeSel.value }); save(); render(); } },
+      h('option', { value: 'prev' }, '납기월의 전월 평균(기본)'), h('option', { value: 'same' }, '납기월의 당월 평균'));
+    modeSel.value = st.fx.mode;
+    var defSel = h('select', { 'aria-label': '통화가 적히지 않은 매입단가의 통화', onchange: function () { st.fx = Object.assign({}, st.fx, { defaultCur: defSel.value }); save(); render(); } },
+      ['KRW', 'CNY', 'USD', 'JPY', 'EUR'].map(function (c) { return h('option', { value: c }, c === 'KRW' ? '원화(KRW)' : c === 'CNY' ? 'China(RMB)' : c); }));
+    defSel.value = st.fx.defaultCur;
+    var autoChk = h('input', { type: 'checkbox', checked: st.fx.useAuto, onchange: function () { st.fx = Object.assign({}, st.fx, { useAuto: autoChk.checked }); save(); render(); } });
+    main.appendChild(h('div', { class: 'card' }, h('h2', null, '2. 설정'),
+      h('div', { class: 'form-grid' },
+        h('label', { class: 'field' }, h('span', null, '어느 달 환율을 쓰나'), modeSel, h('small', null, '전월 평균: 납기월 바로 앞 달의 월평균(그 달이 끝나야 나옴). 당월 평균은 납기월이 끝난 뒤에야 값이 있습니다.')),
+        h('label', { class: 'field' }, h('span', null, '통화가 적히지 않은 매입단가의 통화'), defSel, h('small', null, '매입단가표에 통화 칸이 없고 단가가 모두 위안이면 China(RMB) 를 고르세요. 직접 적은 매입단가는 줄마다 통화를 고를 수 있습니다(수주 취합 화면).')),
+        h('label', { class: 'check field' }, autoChk, h('span', null, '자동 값(서울외국환중개) 함께 쓰기'), h('small', null, '직접 입력과 기준 파일에 없는 달만 자동 값으로 채웁니다. 끄면 기준 파일 · 직접 입력만 씁니다.')))));
+
+    // 3. 이번 수주에 필요한 환율 · 직접 입력
+    var R = fxR(), need = {}, mi = st.intake && st.intake.rows.length ? mappedIntake() : null;
+    if (mi) {
+      Object.keys(mi.price.fxUsed).forEach(function (k) { need[k] = { rows: mi.price.fxUsed[k], missing: false }; });
+      mi.price.fxMissing.forEach(function (m) { if (m.month && m.cur !== '?') { var k = m.cur + '|' + m.month; need[k] = { rows: ((need[k] || {}).rows || 0) + m.rows, missing: true }; } });
+    }
+    Object.keys(st.fx.manual).forEach(function (k) { if (!need[k]) need[k] = { rows: 0, missing: false }; });
+    function setManualRate(k, v) {
+      var m = Object.assign({}, st.fx.manual), x = Pr.num(v);
+      if (x && x > 0) m[k] = x; else delete m[k];
+      st.fx = Object.assign({}, st.fx, { manual: m }); save(); render();
+    }
+    var keys = Object.keys(need).sort();
+    var addCur = h('select', { 'aria-label': '통화' }, Fx.FOREIGN.map(function (c) { return h('option', { value: c }, c === 'CNY' ? 'China(RMB)' : c); }));
+    var addMon = h('input', { type: 'month', 'aria-label': '환율 월' });
+    var addVal = h('input', { type: 'text', inputmode: 'decimal', placeholder: '예: 205.10', 'aria-label': '환율(원)', style: 'max-width:120px' });
+    var otherMiss = mi ? mi.price.fxMissing.filter(function (m) { return !m.month || m.cur === '?'; }) : [];
+    main.appendChild(h('div', { class: 'card', id: 'fx-need' }, h('h2', null, '3. 이번 수주에 쓰는 환율 · 직접 입력'),
+      h('p', { class: 'note' }, '직접 적은 값이 가장 먼저 쓰입니다(기준 파일 · 자동 값보다 앞). 칸을 비우면 직접 입력이 지워지고 다음 출처 값으로 돌아갑니다. 엔화는 100엔당 원입니다.'),
+      !mi ? h('p', { class: 'note' }, '아직 취합한 수주가 없습니다. ', h('a', { href: '#/intake' }, '수주 취합'), '에서 파일을 넣으면 외화 단가가 있는 달이 여기에 나옵니다.') : null,
+      keys.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'list' },
+        h('thead', null, h('tr', null, ['통화', '환율 월', '쓰는 값(원)', '출처', '쓰는 줄', '직접 입력'].map(function (x, i) { return h('th', { class: i === 2 || i === 4 ? 'num' : null }, x); }))),
+        h('tbody', null, keys.map(function (k) {
+          var p = k.split('|'), e = R.find(p[0], p[1]), inp = h('input', { type: 'text', inputmode: 'decimal', value: st.fx.manual[k] == null ? '' : String(st.fx.manual[k]), placeholder: e ? String(e.raw) : '', 'aria-label': k + ' 환율 직접 입력', style: 'max-width:120px', onchange: function () { setManualRate(k, inp.value); } });
+          return h('tr', null, h('td', null, p[0] === 'CNY' ? 'China(RMB)' : p[0]), h('td', { class: 'nowrap' }, p[1]),
+            h('td', { class: 'num nowrap' }, e ? h('strong', null, String(e.raw) + (e.unit !== 1 ? ' /' + e.unit : '')) : h('span', { class: 'tag warn' }, '환율 없음')),
+            h('td', null, e ? e.src + (e.file ? ' · ' + e.file : '') : '-'), h('td', { class: 'num' }, n(need[k].rows)), h('td', null, inp));
+        })))) : (mi ? h('p', { class: 'note' }, '이번 수주에는 외화 단가가 없습니다(모두 원화).') : null),
+      otherMiss.length ? h('p', { class: 'alert warn' }, '환율 월을 정할 수 없는 줄: ' + otherMiss.map(function (m) { return m.cur + ' ' + m.reason + ' ' + m.rows + '행'; }).join(', ') + ' — 납기일을 채우거나 통화를 확인해 주세요.') : null,
+      h('div', { class: 'form-grid', style: 'margin-top:8px' },
+        h('label', { class: 'field' }, h('span', null, '다른 달 직접 입력 — 통화'), addCur),
+        h('label', { class: 'field' }, h('span', null, '환율 월'), addMon),
+        h('label', { class: 'field' }, h('span', null, '환율(원)'), addVal,
+          h('button', { type: 'button', class: 'btn', style: 'margin-top:6px', onclick: function () {
+            var m = Fx.parseMonth(addMon.value), v = Pr.num(addVal.value);
+            if (!m || !(v > 0)) { toast('환율 월과 환율(원)을 적어 주세요', true); return; }
+            setManualRate(addCur.value + '|' + m, v); toast(addCur.value + ' ' + m + ' 환율 ' + v + ' 을 직접 입력으로 넣었습니다');
+          } }, '직접 입력 더하기'))),
+      Object.keys(st.fx.manual).length ? h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn', onclick: function () {
+        if (!window.confirm('직접 입력한 환율 ' + Object.keys(st.fx.manual).length + '개를 지웁니다. 계속할까요?')) return;
+        st.fx = Object.assign({}, st.fx, { manual: {} }); save(); render();
+      } }, '직접 입력한 환율 지우기')) : null));
+
+    // 4. 자동 값
+    var latest = autoRates ? Fx.FOREIGN.map(function (c) {
+      var x = autoRates.currencies[c]; if (!x) return null;
+      var ms = Object.keys(x.months).sort(), last = ms[ms.length - 1];
+      return c + ' ' + last + ' = ' + x.months[last] + (x.unit !== 1 ? '/' + x.unit : '');
+    }).filter(Boolean).join(' · ') : '';
+    main.appendChild(h('div', { class: 'card' }, h('h2', null, '4. 자동 값 — 서울외국환중개 월평균 매매기준율'),
+      autoRates
+        ? h('p', null, '받은 때 ' + String(autoRates.fetchedAt || '').slice(0, 16).replace('T', ' ') + ' (UTC) · 가장 최근: ' + latest + (st.fx.useAuto ? '' : ' — 지금은 쓰지 않음(설정)'))
+        : h('p', { class: 'alert warn' }, '자동 값(data/rates.js)을 읽지 못했습니다. 인터넷 없이 파일로 열었거나 파일이 없는 경우입니다. 기준 파일을 불러오거나 직접 입력하면 그대로 계산됩니다.'),
+      h('p', { class: 'note' }, '브라우저에서 서울외국환중개를 바로 부르면 막히므로(CORS), 저장소의 GitHub Actions 가 매일 09:10 에 최근 24개월 월평균을 받아 data/rates.json 으로 넣어 둡니다. 끝난 달만 있어, 이번 달 월평균은 다음 달 첫날에 들어옵니다. China(RMB) 는 서울외국환중개가 2016년부터 CNY 를 고시하지 않아 원·위안 직거래 시장의 「위안(CNH)」 값을 씁니다. ',
+        h('a', { href: autoRates ? autoRates.sourceUrl : 'http://www.smbs.biz/ExRate/MonAvgStdExRate.jsp', target: '_blank', rel: 'noopener' }, '원본 화면'))));
+
+    // 5. 전체 표
+    var all = R.table();
+    main.appendChild(h('div', { class: 'card' }, h('h2', null, '5. 알고 있는 환율 전체 ' + n(all.length) + '개'),
+      h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn', onclick: function () {
+        writeXlsx({ '적용 환율': Fx.ratesAoa(R, mi ? mi.price.fxUsed : {}, mi ? mi.price.fxMissing : [], fxInfo()) }, '적용환율_' + L.todayIso() + '.xlsx');
+      } }, '「적용 환율」 Excel 내려받기')),
+      all.length ? h('details', null, h('summary', null, '통화 · 월별 값과 출처 보기(최근 달이 위)'),
+        h('div', { class: 'table-wrap' }, h('table', { class: 'list' },
+          h('thead', null, h('tr', null, ['통화', '환율 월', '쓰는 값', '쓰는 출처'].concat(Fx.SRC_ORDER).map(function (x, i) { return h('th', { class: i === 2 || i >= 4 ? 'num' : null }, x); }))),
+          h('tbody', null, all.map(function (e) {
+            return h('tr', null, h('td', null, e.cur), h('td', { class: 'nowrap' }, e.month), h('td', { class: 'num' }, h('strong', null, String(e.raw))), h('td', null, e.src),
+              Fx.SRC_ORDER.map(function (s) { return h('td', { class: 'num' }, e.all[s] == null ? '' : String(e.all[s])); }));
+          })))))
+        : h('p', { class: 'note' }, '아직 아는 환율이 없습니다.')));
+  }
+
   // ── 라우터 ──────────────────────────────────────────
   var ROUTES = [
-    ['intake', '수주 취합', viewIntake], ['monthly', '월별 수주 vs 매입', viewMonthly], ['dashboard', '대시보드', viewDashboard], ['data', '자료 가져오기', viewData], ['settings', '설정', viewSettings],
+    ['intake', '수주 취합', viewIntake], ['monthly', '월별 수주 vs 매입', viewMonthly], ['fx', '환율', viewFx], ['dashboard', '대시보드', viewDashboard], ['data', '자료 가져오기', viewData], ['settings', '설정', viewSettings],
     ['result', '과부족 현황', viewResult], ['daily', '일자별 예상재고', viewDaily], ['plan', '선적계획', viewPlan],
     ['ai', 'AI 분석', viewAi], ['share', '공유·내보내기', viewShare]
   ];
