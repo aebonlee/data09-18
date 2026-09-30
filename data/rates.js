@@ -2,7 +2,7 @@
 window.SPRates = {
   "source": "서울외국환중개 월평균 매매기준율",
   "sourceUrl": "http://www.smbs.biz/ExRate/MonAvgStdExRate.jsp",
-  "fetchedAt": "2026-09-30T05:07:11.553Z",
+  "fetchedAt": "2026-09-30T05:19:09.866Z",
   "note": "외화 1단위당 원(엔화는 100엔당). 끝난 달만 들어 있습니다. China(RMB) = CNY 칸은 SMBS 의 「위안 (CNH)」(원·위안 직거래 시장) 월평균입니다 — SMBS 는 CNY 를 2016-01-01 부터 고시하지 않습니다.",
   "currencies": {
     "CNY": {
@@ -10,6 +10,7 @@ window.SPRates = {
       "label": "위안 (CNH)",
       "unit": 1,
       "months": {
+        "2024-09": 188.53,
         "2024-10": 191.63,
         "2024-11": 193.27,
         "2024-12": 196.93,
