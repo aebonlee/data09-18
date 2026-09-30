@@ -51,6 +51,7 @@
       monthBuckets: true,        // 누적결품의 월 단위 칸(11·12·01…)도 결품으로 넣을지
       shortMode: 'increment',    // increment = 날짜별 늘어난 결품만큼 한 줄씩 | single = 최대 결품을 첫 결품일 한 줄로
       poAllSheets: false,        // 확정(2026-09-30): 발주서 파일에 시트가 여럿이면 최근(발주일자가 가장 늦은) 시트만 / 전부(true)
+      borrowPrice: true,         // 2026-09-30 요청 「발주단가」: 단가 칸이 없는 줄(누적결품 등)은 같은 고객사·같은 품번의 다른 파일 단가로 채움(값이 하나일 때만)
       portalCustomer: '포털 고객사', // 건기·엔진·AM·CKD 파일의 고객사 이름(파일에 이름이 없어 사용자가 적음)
       bobcatCustomer: '밥캣'
     };
@@ -70,7 +71,7 @@
     d.bobcatShortOffset = Math.max(0, Math.min(30, Math.floor(Number(d.bobcatShortOffset) || 0)));
     d.engineMode = d.engineMode === 'sum' ? 'sum' : 'override';
     d.shortMode = d.shortMode === 'single' ? 'single' : 'increment';
-    ['collectDirect', 'monthBuckets', 'poAllSheets'].forEach(function (k) { d[k] = !!d[k]; });
+    ['collectDirect', 'monthBuckets', 'poAllSheets', 'borrowPrice'].forEach(function (k) { d[k] = !!d[k]; });
     d.base = parseDate(d.base) || '';
     return d;
   }
@@ -127,13 +128,15 @@
 
   // 파일 종류별 열 이름 (기획서 11.3 열 매핑표). 이름으로 찾으므로 열 순서가 바뀌어도 됩니다.
   var LAYOUTS = {
-    portalStd: { need: ['품목코드', '납품잔량', '납기일자'], item: ['품목코드'], name: ['품목명'], qty: ['납품잔량'], due: ['납기일자'], orderDate: ['발주일'], orderType: ['오더유형'] },
-    // 군산건기(예정신고전): 생산오더 단위 — 납품잔량 대신 요청수량, 납기일(Actual)
+    // price·currency·priceUnit: 발주단가 열(2026-09-30 요청 「발주단가도 기재」). 없으면 단가 없음으로 둡니다
+    portalStd: { need: ['품목코드', '납품잔량', '납기일자'], item: ['품목코드'], name: ['품목명'], qty: ['납품잔량'], due: ['납기일자'], orderDate: ['발주일'], orderType: ['오더유형'], price: ['발주단가'], currency: ['통화', '화폐'] },
+    // 군산건기(예정신고전): 생산오더 단위 — 납품잔량 대신 요청수량, 납기일(Actual). 발주단가 열이 없습니다(산처리금액만)
     portalProd: { need: ['품목코드', '요청수량', '납기일(Actual)'], item: ['품목코드'], name: ['품목명'], qty: ['요청수량'], due: ['납기일(Actual)'], orderDate: ['생성일'], orderType: ['오더유형 내역', '오더유형'] },
     // 안산AM: 품목코드가 A열, 오더유형 대신 발주구분
-    portalAm: { need: ['품목코드', '납품잔량', '납기일자', '발주구분'], item: ['품목코드'], name: ['품목명'], qty: ['납품잔량'], due: ['납기일자'], orderDate: ['발주일'], orderType: ['발주구분'], extra: ['확정여부'] },
+    portalAm: { need: ['품목코드', '납품잔량', '납기일자', '발주구분'], item: ['품목코드'], name: ['품목명'], qty: ['납품잔량'], due: ['납기일자'], orderDate: ['발주일'], orderType: ['발주구분'], extra: ['확정여부'], price: ['발주단가'], currency: ['화폐', '통화'] },
     short: { need: ['품목코드', 'Stock Qty'], item: ['품목코드'], name: ['품목명'] },
-    bobcatPlan: { need: ['품번', '납품잔량', '납기일자'], item: ['품번'], name: ['품명'], qty: ['납품잔량'], due: ['납기일자'], orderDate: ['발주일'], orderType: ['오더유형'] },
+    // 밥캣: 발주단가 · 사급단가 · 총단가 중 발주단가(받은 파일은 사급단가 0 이라 총단가 = 발주단가)
+    bobcatPlan: { need: ['품번', '납품잔량', '납기일자'], item: ['품번'], name: ['품명'], qty: ['납품잔량'], due: ['납기일자'], orderDate: ['발주일'], orderType: ['오더유형'], price: ['발주단가'], currency: ['통화'] },
     bobcatShort: { need: ['품번', '현재고'], item: ['품번'], name: ['품명'] },
     shipplan: { need: ['품목코드', '미판매수량'], item: ['품목코드'], name: ['품목명(규격)', '품목명'], qty: ['미판매수량'], due: ['변경선적요청일(调整）', '변경선적요청일(调整)', '변경선적요청일'], due2: ['납기일자'] },
     stock: { need: ['품목코드', '합계'], item: ['품목코드'], name: ['품목명'], qty: ['합계'], safety: ['안전재고'] }
@@ -142,9 +145,20 @@
     var hr = findHeader(aoa, lay.need);
     if (hr < 0) return null;
     var H = aoa[hr], m = { hr: hr, headers: H };
-    Object.keys(lay).forEach(function (k) { if (k !== 'need') m[k] = col(H, lay[k]); });
+    Object.keys(lay).forEach(function (k) { if (k !== 'need' && Array.isArray(lay[k])) m[k] = col(H, lay[k]); });
     return m;
   }
+  /** 발주단가: 단가 칸(가격단위 열이 1보다 크면 나눔). 빈칸·0·음수·글자는 null(단가 없음) */
+  function priceOf(ln, m) {
+    if (!(m.price >= 0)) return null;
+    var p = num(ln[m.price]);
+    if (p === null || p <= 0) return null;
+    var u = m.priceUnit >= 0 ? num(ln[m.priceUnit]) : null;
+    if (u && u > 1) p = p / u;
+    return Math.round(p * 10000) / 10000;
+  }
+  function currencyOf(ln, m) { return m.currency >= 0 ? str(ln[m.currency]) : ''; }
+  function isWon(c) { return !c || /^(krw|원|₩|won)$/i.test(c); }
   function portalLayout(aoa) {
     var order = ['portalStd', 'portalProd', 'portalAm'];
     for (var i = 0; i < order.length; i++) {
@@ -241,9 +255,19 @@
     function firstSheet(f) { var nm = f.sheets.names[0]; return { name: nm, aoa: f.sheets.sheets[nm] || [] }; }
     function portalCustomer(f) { return f.cls.group === '밥캣' ? o.bobcatCustomer : o.portalCustomer; }
     function add(f, rep, r, fields) {
-      var row = Object.assign({ customer: rep.customer, plant: f.cls.plant || '', group: f.cls.group || '', name: '', orderDate: null, note: '', source: f.name, sheet: rep.sheet, row: r }, fields);
+      var row = Object.assign({ customer: rep.customer, plant: f.cls.plant || '', group: f.cls.group || '', name: '', orderDate: null, note: '', source: f.name, sheet: rep.sheet, row: r, price: null, currency: '' }, fields);
+      if (row.price != null) row.priceSrc = '원본';
+      if (row.currency && !isWon(row.currency)) check(f.name, r, '통화가 원화가 아님', row.item + ' · ' + row.currency + ' — 단가를 그대로 두었습니다(환산하지 않음)');
       rows.push(row); rep.collected++;
       return row;
+    }
+    // 같은 고객사·같은 품번의 단가(규칙으로 뺀 행 것도) — 단가 칸이 없는 줄을 채울 재료
+    var priceIdx = {};
+    function notePrice(customer, item, p, file) {
+      if (p == null) return;
+      var k = customer + '|' + item, x = priceIdx[k] || (priceIdx[k] = { values: [], files: [] });
+      if (x.values.indexOf(p) < 0) x.values.push(p);
+      if (x.files.indexOf(file) < 0) x.files.push(file);
     }
 
     // 3-1. 누적결품(엔진·밥캣)을 먼저 읽어 겹침 판단 재료를 만듭니다
@@ -256,7 +280,7 @@
         rep = Report(f, TYPE_LABEL.unknown); reps.push(rep);
         check(f.name, '', '종류를 판별하지 못한 파일', f.cls.why || ''); return;
       }
-      if (t === 'pdf') { reps.push(processPdf(f, o, check, rows)); return; }
+      if (t === 'pdf') { reps.push(processPdf(f, o, check, rows, notePrice)); return; }
       if (!f.sheets) { rep = Report(f, TYPE_LABEL[t]); reps.push(rep); check(f.name, '', '파일을 읽지 못함', ''); return; }
 
       if (t === 'short' || t === 'bobcatShort') {
@@ -332,6 +356,8 @@
             var it = str(ln[mp.item]);
             if (!it) { check(f.name, r2 + 1, '품목코드가 빈 행', ''); continue; }
             rep.read++;
+            var pr2 = priceOf(ln, mp);
+            notePrice(rep.customer, it, pr2, f.name);
             if (isDirect && !o.collectDirect) { exclude(rep, '직송 — 수집 안 함 설정'); continue; }
             var ot = mp.orderType >= 0 ? str(ln[mp.orderType]) : '';
             if (f.cls.group === '엔진' && /^mass\s*po$/i.test(ot)) { exclude(rep, '오더유형 Mass PO(요청 ② — 엔진 납품예정 제외)'); continue; }
@@ -342,7 +368,7 @@
             var extra = [];
             if (ot) extra.push(ot);
             if (mp.extra >= 0 && str(ln[mp.extra])) extra.push(str(ln[mp.extra]));
-            var row = add(f, rep, r2 + 1, { item: it, name: str(ln[mp.name]), qty: q, due: due, orderDate: mp.orderDate >= 0 ? parseDate(ln[mp.orderDate]) : null, rule: isDirect ? '직송' : '납품예정', note: extra.join(' · ') });
+            var row = add(f, rep, r2 + 1, { item: it, name: str(ln[mp.name]), qty: q, due: due, orderDate: mp.orderDate >= 0 ? parseDate(ln[mp.orderDate]) : null, rule: isDirect ? '직송' : '납품예정', note: extra.join(' · '), price: pr2, currency: currencyOf(ln, mp) });
             if (f.cls.group === '엔진') enginePlanRows.push({ row: row, rep: rep });
           }
           if (isDirect && !o.collectDirect) rep.notes.push('직송 수집을 끈 설정이라 넣지 않았습니다(2026-09-30 확정 기본값은 납품예정과 같이 넣음)');
@@ -352,7 +378,7 @@
         return;
       }
 
-      if (t === 'po') { reps.push(processPo(f, o, check, add)); return; }
+      if (t === 'po') { reps.push(processPo(f, o, check, add, notePrice)); return; }
       if (t === 'shipplan' || t === 'stock') { reps.push(processSide(f, t, check)); return; }
     });
 
@@ -375,6 +401,8 @@
         var it = str(ln[mp.item]);
         if (!it) { check(f.name, r + 1, '품번이 빈 행', ''); continue; }
         rep.read++;
+        var pb = priceOf(ln, mp);
+        notePrice(rep.customer, it, pb, f.name);
         if (x.direct && !o.collectDirect) { exclude(rep, '직송 — 수집 안 함 설정'); continue; }
         if (bobcatShortItems[it]) { exclude(rep, '누적결품(위블록) 품번과 겹침 — 결품 값 우선(매크로 규칙)'); continue; }
         var q = num(ln[mp.qty]), due = parseDate(ln[mp.due]);
@@ -385,16 +413,28 @@
         var notes = [];
         if (mp.orderType >= 0 && str(ln[mp.orderType])) notes.push(str(ln[mp.orderType]));
         if (c !== due) notes.push('원납기 ' + due + ' → ' + c + (c === base ? '(과거 → 기준일)' : '(마지막 날짜로 조임)'));
-        add(f, rep, r + 1, { item: it, name: str(ln[mp.name]), qty: q, due: c, originalDue: due, orderDate: mp.orderDate >= 0 ? parseDate(ln[mp.orderDate]) : null, rule: x.direct ? '밥캣 직송' : '밥캣 납품예정', note: notes.join(' · ') });
+        add(f, rep, r + 1, { item: it, name: str(ln[mp.name]), qty: q, due: c, originalDue: due, orderDate: mp.orderDate >= 0 ? parseDate(ln[mp.orderDate]) : null, rule: x.direct ? '밥캣 직송' : '밥캣 납품예정', note: notes.join(' · '), price: pb, currency: currencyOf(ln, mp) });
       }
       if (x.direct && !o.collectDirect) rep.notes.push('직송 수집을 끈 설정이라 넣지 않았습니다(2026-09-30 확정 기본값은 넣음)');
       else if (x.direct) rep.notes.push('밥캣 직송도 납품예정 일반과 같은 규칙(위블록 겹침 제외·원납기 조임)으로 넣었습니다(2026-09-30 확정)');
     });
 
+    // 3-4. 단가 칸이 없는 줄(누적결품·단가 열 없는 양식) — 같은 고객사·같은 품번의 다른 파일 단가가 하나뿐이면 그 값(원본(같은 품번))
+    var priceMulti = {};
+    rows.forEach(function (r) {
+      if (r.price != null) return;
+      var x = priceIdx[r.customer + '|' + r.item];
+      if (!x) return;
+      if (x.values.length > 1) { priceMulti[r.customer + '|' + r.item] = x.values.length; r.priceNote = '같은 품번 단가 ' + x.values.length + '가지 — 채우지 않음'; return; }
+      if (!o.borrowPrice) return;
+      r.price = x.values[0]; r.priceSrc = '원본(같은 품번)'; r.priceNote = '단가 = ' + x.files.join(', ');
+    });
     rows.sort(function (a, b) { return a.due.localeCompare(b.due) || a.item.localeCompare(b.item) || a.source.localeCompare(b.source); });
     var side = { stock: null, shipments: null };
     list.forEach(function (f) { if (f._side) side[f.cls.type === 'stock' ? 'stock' : 'shipments'] = (side[f.cls.type === 'stock' ? 'stock' : 'shipments'] || []).concat(f._side); });
-    return { base: base, fileBase: fileBase, options: o, rows: rows, files: reps, checks: checks, stock: side.stock, shipments: side.shipments, lastBobcatDate: bobcatLast };
+    var multiItems = Object.keys(priceMulti).length, idxMulti = Object.keys(priceIdx).filter(function (k) { return priceIdx[k].values.length > 1; }).length;
+    return { base: base, fileBase: fileBase, options: o, rows: rows, files: reps, checks: checks, stock: side.stock, shipments: side.shipments, lastBobcatDate: bobcatLast,
+      priceInfo: { items: Object.keys(priceIdx).length, multiItems: idxMulti, blockedItems: multiItems } };
   }
 
   /** 밥캣 원납기 조임(매크로 4-3): 과거 → 기준일, 마지막 날짜 뒤 → 마지막 날짜 */
@@ -463,9 +503,9 @@
   // ── 4. 발주서 (요청 ③) — 고객사마다 양식이 달라 머리행 이름으로 양식을 알아봅니다 ─────
   /* 목록형 양식 A~C 는 열 이름, 서식형(D) 은 「품번」「발주수량/발주량」 표 + 「발주일」「납기일」 칸 */
   var PO_LIST = [
-    { id: 'A', label: '목록형 A (자재코드·납품서잔량·납기요청일·결재일자)', need: ['자재코드', '납품서잔량', '납기요청일'], item: ['자재코드'], name: ['자재내역'], qty: ['납품서잔량'], due: ['납기요청일'], orderDate: ['결재일자'] },
-    { id: 'B', label: '목록형 B (자재코드·납품 가능 수량·납기요청일시·수주일자)', need: ['자재코드', '납품 가능 수량', '납기요청일시'], item: ['자재코드'], name: ['자재명'], qty: ['납품 가능 수량'], due: ['납기요청일시'], orderDate: ['수주일자'] },
-    { id: 'C', label: '목록형 C (품목번호·입력가능수량·납기일자·발주일자)', need: ['품목번호', '입력가능수량', '납기일자'], item: ['품목번호'], name: ['품목명'], qty: ['입력가능수량'], due: ['납기일자'], orderDate: ['발주일자'] }
+    { id: 'A', label: '목록형 A (자재코드·납품서잔량·납기요청일·결재일자)', need: ['자재코드', '납품서잔량', '납기요청일'], item: ['자재코드'], name: ['자재내역'], qty: ['납품서잔량'], due: ['납기요청일'], orderDate: ['결재일자'], price: ['단가'], currency: ['화폐'] },
+    { id: 'B', label: '목록형 B (자재코드·납품 가능 수량·납기요청일시·수주일자)', need: ['자재코드', '납품 가능 수량', '납기요청일시'], item: ['자재코드'], name: ['자재명'], qty: ['납품 가능 수량'], due: ['납기요청일시'], orderDate: ['수주일자'], price: ['단가'], currency: ['통화'] },
+    { id: 'C', label: '목록형 C (품목번호·입력가능수량·납기일자·발주일자)', need: ['품목번호', '입력가능수량', '납기일자'], item: ['품목번호'], name: ['품목명'], qty: ['입력가능수량'], due: ['납기일자'], orderDate: ['발주일자'], price: ['발주단가'], priceUnit: ['가격단위'], currency: ['통화'] }
   ];
   function formHeader(aoa) {
     for (var r = 0; r < Math.min(aoa.length, 40); r++) {
@@ -474,7 +514,7 @@
       var qi = -1;
       hs.forEach(function (h, i) { if (qi < 0 && /^발주(수)?량/.test(h)) qi = i; });
       if (qi < 0) continue;
-      return { hr: r, item: ci, name: hs.indexOf('품명'), qty: qi, memo: hs.indexOf('비고') };
+      return { hr: r, item: ci, name: hs.indexOf('품명'), qty: qi, memo: hs.indexOf('비고'), price: hs.indexOf('단가') };
     }
     return null;
   }
@@ -502,7 +542,7 @@
     if (typeof v === 'number') return v >= 36526 && v <= 73050 ? parseDate(v) : null;
     return parseDate(v);
   }
-  function processPo(f, o, check, add) {
+  function processPo(f, o, check, add, notePrice) {
     var rep = Report(f, TYPE_LABEL.po + ' · ' + f.po.def.label);
     rep.customer = customerFromName(f.name); rep.group = '발주서';
     if (f.po.kind === 'list') {
@@ -518,11 +558,13 @@
           var it = str(ln[m.item]);
           if (!it) { check(f.name, r + 1, '품번이 빈 행', ''); continue; }
           rep.read++;
+          var pp = priceOf(ln, m);
+          notePrice(rep.customer, it, pp, f.name);
           var q = num(ln[m.qty]), due = parseDate(ln[m.due]);
           if (q === null) { check(f.name, r + 1, '수량을 읽지 못함', colName(m.qty) + '「' + str(ln[m.qty]) + '」'); continue; }
           if (q <= 0) { exclude(rep, '잔량 0'); continue; }
           if (!due) { check(f.name, r + 1, '납기일을 읽지 못함', colName(m.due) + '「' + str(ln[m.due]) + '」'); continue; }
-          add(f, rep, r + 1, { customer: rep.customer, plant: '', group: '발주서', item: it, name: str(ln[m.name]), qty: q, due: due, orderDate: m.orderDate >= 0 ? parseDate(ln[m.orderDate]) : null, rule: '발주서 ' + def.id });
+          add(f, rep, r + 1, { customer: rep.customer, plant: '', group: '발주서', item: it, name: str(ln[m.name]), qty: q, due: due, orderDate: m.orderDate >= 0 ? parseDate(ln[m.orderDate]) : null, rule: '발주서 ' + def.id, price: pp, currency: currencyOf(ln, m) });
         }
       });
       return rep;
@@ -573,6 +615,8 @@
         if (/^(소계|합계)$/.test(norm(it))) break; // 표 끝
         if (!used) { rep.read++; exclude(rep, '지난 발주서 시트'); continue; }
         rep.read++;
+        var fp = !multi && h.price > h.qty ? priceOf(ln, { price: h.price }) : null;
+        notePrice(rep.customer, it, fp, f.name);
         if (!anyQ) { exclude(rep, '수량 칸 비어 있음(이번 발주 없음)'); continue; }
         qCells.forEach(function (q) {
           if (str(q.v) === '') return;
@@ -580,7 +624,7 @@
           if (n === null || n < 0) { check(f.name, r + 1, n === null ? '수량을 읽지 못함' : '수량이 음수(취소·조정?)', '시트「' + x.nm + '」 ' + colName(q.col) + '「' + str(q.v) + '」'); return; }
           if (n === 0) { exclude(rep, '잔량 0'); return; }
           if (!q.date) { check(f.name, r + 1, '납기일을 찾지 못함', '시트「' + x.nm + '」 「납기일」 칸이 비었습니다 · ' + it + ' ' + n); return; }
-          add(f, rep, r + 1, { customer: rep.customer, plant: '', group: '발주서', sheet: x.nm, item: it, name: h.name >= 0 ? str(ln[h.name]) : '', qty: n, due: q.date, orderDate: x.od, rule: '발주서 D' });
+          add(f, rep, r + 1, { customer: rep.customer, plant: '', group: '발주서', sheet: x.nm, item: it, name: h.name >= 0 ? str(ln[h.name]) : '', qty: n, due: q.date, orderDate: x.od, rule: '발주서 D', price: fp });
         });
       }
     });
@@ -642,14 +686,23 @@
       if (Math.abs(r.y - i.y) > 16) return;
       (i.x <= left + 8 ? r.code : r.name).push(i);
     });
+    // 단가·공급가액: 같은 줄에서 수량 오른쪽 숫자를 차례로(단가 → 공급가액 → 부가세). 머리에 「단가」가 없으면 읽지 않습니다
+    rowsOut.forEach(function (r) {
+      r.price = null; r.supply = null;
+      if (priceX === null) return;
+      var q = qtys.filter(function (i) { return i.y === r.y; })[0];
+      var right = body.filter(function (i) { return i !== q && Math.abs(i.y - r.y) <= 2.5 && i.x > q.x + 5 && L.parseQty(i.str) !== null; }).sort(function (a, b) { return a.x - b.x; });
+      if (right.length) { var pv = L.parseQty(right[0].str); r.price = pv > 0 ? pv : null; }
+      if (right.length > 1) r.supply = L.parseQty(right[1].str);
+    });
     rowsOut.forEach(function (r) {
       var code = r.code.sort(function (a, b) { return b.y - a.y || a.x - b.x; }).map(function (i) { return str(i.str); }).join('');
       var name = r.name.sort(function (a, b) { return b.y - a.y || a.x - b.x; }).map(function (i) { return str(i.str); }).join(' ');
-      out.lines.push({ item: code, name: name, qty: r.qty, y: r.y });
+      out.lines.push({ item: code, name: name, qty: r.qty, y: r.y, price: r.price, supply: r.supply });
     });
     return out;
   }
-  function processPdf(f, o, check, rows) {
+  function processPdf(f, o, check, rows, notePrice) {
     var rep = Report(f, TYPE_LABEL.pdf);
     rep.customer = customerFromName(f.name); rep.group = '발주서';
     if (!f.pdf) { check(f.name, '', 'PDF 글자를 꺼내지 못함', f.pdfError || '스캔 이미지 PDF 이면 글자가 없습니다'); return rep; }
@@ -659,7 +712,9 @@
       rep.read++;
       if (!ln.item) { check(f.name, 'p' + (i + 1), '품목코드를 읽지 못함', '수량 ' + ln.qty); return; }
       if (!p.due) { check(f.name, 'p' + (i + 1), '납기일을 찾지 못함', ln.item + ' ' + ln.qty); return; }
-      rows.push({ customer: rep.customer, plant: '', group: '발주서', item: ln.item, name: ln.name, qty: ln.qty, due: p.due, orderDate: p.orderDate, source: f.name, sheet: '', row: 'p' + (i + 1), rule: '발주서 PDF', note: 'PDF 글자에서 읽음 — 원본과 대조해 주세요' });
+      notePrice(rep.customer, ln.item, ln.price, f.name);
+      if (ln.price != null && ln.supply != null && Math.abs(ln.price * ln.qty - ln.supply) > 1) check(f.name, 'p' + (i + 1), 'PDF 단가 × 수량이 공급가액과 다름', ln.item + ' — 원본과 대조해 주세요');
+      rows.push({ customer: rep.customer, plant: '', group: '발주서', item: ln.item, name: ln.name, qty: ln.qty, due: p.due, orderDate: p.orderDate, source: f.name, sheet: '', row: 'p' + (i + 1), rule: '발주서 PDF', note: 'PDF 글자에서 읽음 — 원본과 대조해 주세요', price: ln.price, priceSrc: ln.price != null ? '원본' : undefined, currency: '' });
       rep.collected++;
     });
     if (p.lines.length) rep.notes.push('PDF 에서 글자를 꺼내 읽었습니다(발주일 = 일련번호 날짜, 납기 = 「납기일자」). 품목코드가 두 줄로 나뉘어 있으면 이어 붙였습니다');
@@ -669,10 +724,14 @@
   // ── 6. 내보내기·넘기기 ─────────────────────────────────
   // 품목코드 = 고객사 품번(파일 그대로), 천일품번 = 매핑표로 바꾼 당사 품번(기획서 11.10). 매핑 전 행은 천일품번 칸이 품목코드와 같습니다
   var MAP_LABEL = { mapped: '매핑됨', conflict: '매핑 충돌', unmapped: '매핑 없음', nomap: '매핑표 없음', none: '매핑 대상 아님' };
-  var HEAD = ['고객사', '공장', '구분', '품목코드', '천일품번', '매핑', '품명', '수량', '납기일', '발주일', '원본파일', '원본 시트', '원본 행', '규칙', '비고'];
+  // 발주단가(2026-09-30 요청): 단가 = 원본 칸(가격단위로 나눔) · 같은 품번 다른 파일 · 직접입력 · 단가표, 금액 = 수량 × 단가
+  var HEAD = ['고객사', '공장', '구분', '품목코드', '천일품번', '매핑', '품명', '수량', '발주단가', '금액', '단가 출처', '납기일', '발주일', '원본파일', '원본 시트', '원본 행', '규칙', '비고'];
+  function amountOf(r) { return r.price == null ? null : Math.round(r.qty * r.price * 100) / 100; }
   function rowsAoa(rows) {
     return [HEAD].concat(rows.map(function (r) {
-      return [r.customer, r.plant, r.group, r.item, r.company || r.item, MAP_LABEL[r.mapStatus] || '', r.name, r.qty, r.due, r.orderDate || '', r.source, r.sheet || '', r.row, r.rule || '', r.note || ''];
+      var a = amountOf(r);
+      return [r.customer, r.plant, r.group, r.item, r.company || r.item, MAP_LABEL[r.mapStatus] || '', r.name, r.qty, r.price == null ? '' : r.price, a == null ? '' : a, r.price == null ? '단가 없음' : (r.priceSrc || '원본'),
+        r.due, r.orderDate || '', r.source, r.sheet || '', r.row, r.rule || '', [r.note, r.priceNote].filter(Boolean).join(' · ')];
     }));
   }
   function excludedText(rep) { return Object.keys(rep.excluded).map(function (k) { return k + ' ' + rep.excluded[k]; }).join(' / '); }
@@ -680,8 +739,10 @@
   function exportSheets(res) {
     var s = {};
     s['통합수주'] = rowsAoa(res.rows);
-    s['파일별집계'] = [['원본파일', '판별', '고객사', '공장', '구분', '시트', '읽은 행', '수집', '제외', '제외 사유', '메모']].concat(res.files.map(function (f) {
-      return [f.file, f.typeLabel, f.customer, f.plant, f.group, f.sheet, f.read, f.collected, excludedCount(f), excludedText(f), f.notes.join(' / ')];
+    var ps = priceBySource(res.rows);
+    s['파일별집계'] = [['원본파일', '판별', '고객사', '공장', '구분', '시트', '읽은 행', '수집', '단가 있음', '단가 없음', '제외', '제외 사유', '메모']].concat(res.files.map(function (f) {
+      var p = ps[f.file] || { has: 0, none: 0 };
+      return [f.file, f.typeLabel, f.customer, f.plant, f.group, f.sheet, f.read, f.collected, p.has, p.none, excludedCount(f), excludedText(f), f.notes.join(' / ')];
     }));
     s['★확인필요'] = [['원본파일', '행', '내용', '자세히']].concat(res.checks.map(function (c) { return [c.file, c.row, c.reason, c.detail]; }));
     s['수주현황'] = ordersAoa(res.rows);
@@ -692,22 +753,30 @@
   /** 통합 표 → 이 도구의 입력 ①「수주현황」 표준 열(자동 매핑됩니다). 품번 = 천일품번(재고·선적계획과 맞추는 값).
       고객사 품번·매핑·공장·구분·원본은 뒤에 덧붙입니다 */
   function ordersAoa(rows) {
-    return [['품번', '품명', '고객사', '수주일', '납기일', '수주수량', '공장', '구분', '고객사 품목코드', '매핑', '원본파일', '원본 행']].concat(rows.map(function (r) {
-      return [r.company || r.item, r.name, r.customer, r.orderDate || '', r.due, r.qty, r.plant, r.group, r.item, MAP_LABEL[r.mapStatus] || '', r.source, r.row];
+    return [['품번', '품명', '고객사', '수주일', '납기일', '수주수량', '공장', '구분', '고객사 품목코드', '매핑', '원본파일', '원본 행', '발주단가', '금액']].concat(rows.map(function (r) {
+      var a = amountOf(r);
+      return [r.company || r.item, r.name, r.customer, r.orderDate || '', r.due, r.qty, r.plant, r.group, r.item, MAP_LABEL[r.mapStatus] || '', r.source, r.row, r.price == null ? '' : r.price, a == null ? '' : a];
     }));
+  }
+  /** 원본파일마다 단가 있는 줄·없는 줄 */
+  function priceBySource(rows) {
+    var o = {};
+    rows.forEach(function (r) { var x = o[r.source] || (o[r.source] = { has: 0, none: 0 }); if (r.price == null) x.none++; else x.has++; });
+    return o;
   }
   function summary(res) {
     var read = 0, ex = 0;
     res.files.forEach(function (f) { read += f.read; ex += excludedCount(f); });
     var qty = res.rows.reduce(function (s, r) { return s + r.qty; }, 0);
-    return { files: res.files.length, read: read, rows: res.rows.length, qty: qty, excluded: ex, checks: res.checks.length };
+    var priced = res.rows.filter(function (r) { return r.price != null; }).length;
+    return { files: res.files.length, read: read, rows: res.rows.length, qty: qty, excluded: ex, checks: res.checks.length, priced: priced, unpriced: res.rows.length - priced };
   }
 
   return {
     defaultOptions: defaultOptions, mergeOptions: mergeOptions, upgradeOptions: upgradeOptions, classify: classify, fileDate: fileDate, customerFromName: customerFromName,
     TYPE_LABEL: TYPE_LABEL, LAYOUTS: LAYOUTS, PO_LIST: PO_LIST,
     shortageSteps: shortageSteps, shortDateCols: shortDateCols, clampDue: clampDue, detectPo: detectPo, parsePdfOrder: parsePdfOrder,
-    process: process, rowsAoa: rowsAoa, ordersAoa: ordersAoa, exportSheets: exportSheets, summary: summary, excludedText: excludedText, excludedCount: excludedCount,
+    process: process, rowsAoa: rowsAoa, amountOf: amountOf, priceBySource: priceBySource, ordersAoa: ordersAoa, exportSheets: exportSheets, summary: summary, excludedText: excludedText, excludedCount: excludedCount,
     fixZip: fixZip, num: num, colName: colName, isFinishedCode: isFinishedCode, RULES_VERSION: RULES_VERSION
   };
 

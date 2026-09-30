@@ -20,11 +20,15 @@
   /* 머리 이름(norm) → 채우는 방법. 여기 없는 열은 「고정값」 표에 적은 값(없으면 빈칸) */
   var FIELDS = {
     '일자': 'date', '순번': 'seq', '납품처코드': 'partyCode', '납품처명': 'partyName', '담당자': 'manager', '납기일자': 'due',
-    '품목코드상단': 'topItem', '품목코드': 'item', '품목명': 'name', '수량': 'qty'
+    '품목코드상단': 'topItem', '품목코드': 'item', '품목명': 'name', '수량': 'qty',
+    // 2026-09-30 요청 「발주단가」: 양식에 단가·금액 열이 있으면 채웁니다
+    '단가': 'price', '발주단가': 'price', 'unitprice': 'price', '금액': 'amount', '발주금액': 'amount', '공급가액': 'amount'
   };
+  var PRICE_HEADER = '단가';
   var FIELD_LABEL = {
     date: '일자 — 설정(오늘·발주일·기준일)', seq: '순번 — 1부터 차례로(설정: 행마다·납품처별)', partyCode: '납품처 설정표', partyName: '납품처 설정표',
-    manager: '납품처 설정표(비면 기본 담당자)', due: '통합 수주의 납기일', topItem: '설정(비움·품목코드와 같게)', item: '천일품번', name: '설정(수주 파일의 품명·비움)', qty: '통합 수주의 수량'
+    manager: '납품처 설정표(비면 기본 담당자)', due: '통합 수주의 납기일', topItem: '설정(비움·품목코드와 같게)', item: '천일품번', name: '설정(수주 파일의 품명·비움)', qty: '통합 수주의 수량',
+    price: '발주단가(원본 · 같은 품번 · 직접입력 · 단가표, 없으면 빈칸)', amount: '수량 × 발주단가(단가 없으면 빈칸)'
   };
   function fieldOf(header) { return FIELDS[norm(header)] || null; }
 
@@ -36,6 +40,7 @@
       topItem: 'blank',      // blank 비움 | same 품목코드와 같게 — 확인 부탁
       nameMode: 'order',     // order 수주 파일의 품명 | blank 비움(ERP 가 품목코드로 채우는 경우)
       unmapped: 'skip',      // skip 매핑 없는 품번은 내보내지 않음 | keep 고객사 품번 그대로 내보냄
+      priceCol: 'add',       // 양식에 단가 열이 없을 때: add 「수량」 바로 뒤에 「단가」 열을 더함 | none 더하지 않음 — 확인 부탁(ERP 가 열이 늘어도 받는지)
       manager: '',           // 기본 담당자(납품처 표에 담당자가 없을 때)
       parties: {},           // { 납품처 열쇠: { code, name, manager } }
       fixed: {}              // { 머리 이름: 값 } — 추가문자형식1·작업지시No.·BOM버전·규격·창고·적요·하위반제품수 등
@@ -50,6 +55,7 @@
     if (['blank', 'same'].indexOf(d.topItem) < 0) d.topItem = 'blank';
     if (['order', 'blank'].indexOf(d.nameMode) < 0) d.nameMode = 'order';
     if (['skip', 'keep'].indexOf(d.unmapped) < 0) d.unmapped = 'skip';
+    if (['add', 'none'].indexOf(d.priceCol) < 0) d.priceCol = 'add';
     d.manager = str(d.manager);
     if (!d.parties || typeof d.parties !== 'object') d.parties = {};
     if (!d.fixed || typeof d.fixed !== 'object') d.fixed = {};
@@ -83,6 +89,15 @@
     return { error: '시트「' + nm + '」에서 머리행(칸 2개 이상 찬 행)을 찾지 못했습니다' };
   }
   function defaultTemplate() { return { sheet: DEFAULT_SHEET, headers: DEFAULT_HEADERS.slice(), builtIn: true }; }
+  /** 내보낼 머리행: 양식에 단가 열이 없고 priceCol = add 면 「수량」 바로 뒤(없으면 맨 끝)에 「단가」를 끼웁니다 */
+  function outHeaders(tplHeaders, o) {
+    var H = tplHeaders.slice();
+    if (o.priceCol !== 'add' || H.some(function (h) { return fieldOf(h) === 'price'; })) return { headers: H, added: [] };
+    var qi = -1;
+    H.forEach(function (h, i) { if (qi < 0 && fieldOf(h) === 'qty') qi = i; });
+    H.splice(qi < 0 ? H.length : qi + 1, 0, PRICE_HEADER);
+    return { headers: H, added: [PRICE_HEADER] };
+  }
 
   function fmt(iso, f) { return !iso ? '' : f === 'compact' ? iso.replace(/-/g, '') : iso; }
 
@@ -94,7 +109,7 @@
     var o = mergeOptions(opts);
     tpl = tpl && tpl.headers && tpl.headers.length ? tpl : defaultTemplate();
     ctx = ctx || {};
-    var H = tpl.headers, kinds = H.map(fieldOf);
+    var oh = outHeaders(tpl.headers, o), H = oh.headers, kinds = H.map(fieldOf);
     var skipped = { unmapped: 0 };
     var use = rows.filter(function (r) {
       if (r.mapStatus === 'unmapped' && o.unmapped === 'skip') { skipped.unmapped++; return false; }
@@ -124,18 +139,22 @@
           case 'item': return item;
           case 'name': return o.nameMode === 'order' ? str(r.name) : '';
           case 'qty': return r.qty;
+          case 'price': return r.price == null ? '' : r.price;
+          case 'amount': return r.price == null ? '' : Math.round(r.qty * r.price * 100) / 100;
           default: return o.fixed[h] == null ? '' : o.fixed[h];
         }
       });
     });
     var unknown = H.filter(function (h, c) { return !kinds[c] && str(h) !== ''; });
     var blankCols = H.filter(function (h, c) { return body.every(function (ln) { return str(ln[c]) === ''; }); });
-    return { sheet: tpl.sheet || DEFAULT_SHEET, aoa: [H.slice()].concat(body), count: body.length, skipped: skipped, unknown: unknown, blankCols: blankCols };
+    var hasPriceCol = kinds.indexOf('price') >= 0 || kinds.indexOf('amount') >= 0;
+    var noPrice = hasPriceCol ? use.filter(function (r) { return r.price == null; }).length : 0;
+    return { sheet: tpl.sheet || DEFAULT_SHEET, aoa: [H.slice()].concat(body), count: body.length, skipped: skipped, unknown: unknown, blankCols: blankCols, added: oh.added, noPrice: noPrice, headers: H };
   }
 
   return {
     DEFAULT_SHEET: DEFAULT_SHEET, DEFAULT_HEADERS: DEFAULT_HEADERS, FIELD_LABEL: FIELD_LABEL,
     defaultOptions: defaultOptions, mergeOptions: mergeOptions, defaultTemplate: defaultTemplate, readTemplate: readTemplate,
-    fieldOf: fieldOf, partyKey: partyKey, partyKeys: partyKeys, build: build
+    fieldOf: fieldOf, partyKey: partyKey, partyKeys: partyKeys, build: build, outHeaders: outHeaders, PRICE_HEADER: PRICE_HEADER
   };
 });

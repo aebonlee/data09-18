@@ -33,7 +33,10 @@
 --    intake_check       — 「★확인 필요」 한 줄 (판별·매핑하지 못한 파일·칸)
 --    ── 품번 매핑·ERP 업로드 (기획서 11.10, 2026-09-30 매핑표·업로드 양식 수령) ──
 --    part_mapping       — 고객사 품번 → 천일품번 (묶음: doosan 건기·엔진 / bobcat 밥캣). 충돌은 두 행으로 남긴다
---    upload_setting     — ERP 업로드 양식 설정 (양식 머리행·일자·순번·납품처표·고정값) — 사용자당 한 행
+--    upload_setting     — ERP 업로드 양식 설정 (양식 머리행·일자·순번·납품처표·고정값·단가 열) — 사용자당 한 행
+--    ── 발주단가 (기획서 11.11, 2026-09-30 요청 「발주단가도 기재가 필요하다」) ──
+--    intake_order_line 의 unit_price · amount · price_source  — 통합 수주 한 행의 발주단가·금액(= 수량 × 단가)·단가 출처
+--    price_master       — 단가표(품목코드 → 단가)와 화면에서 직접 적은 단가. 원본에 단가가 없는 줄을 채운다
 --
 --  접근 규칙
 --    · 자료는 올린 사람(owner_id)만 쓰고 고친다.
@@ -215,6 +218,7 @@ create table if not exists public.intake_setting (
   month_buckets        boolean not null default true,                 -- 누적결품 월 단위 칸
   short_mode           text not null default 'increment' check (short_mode in ('increment', 'single')),
   po_all_sheets        boolean not null default false,                -- 발주서 시트 전부 / 최근 시트만(확정 2026-09-30)
+  borrow_price         boolean not null default true,                 -- 단가 칸이 없는 줄에 같은 품번의 다른 파일 단가(값이 하나일 때만)
   portal_customer      text not null default '포털 고객사',
   bobcat_customer      text not null default '밥캣',
   created_at           timestamptz not null default now(),
@@ -223,6 +227,7 @@ create table if not exists public.intake_setting (
 -- 2026-09-30 수강생 답으로 바뀐 기본값 — 이미 만들어진 표에도 반영(재실행 안전, 저장된 행은 그대로)
 alter table public.intake_setting alter column bobcat_short_offset set default 2;
 alter table public.intake_setting alter column collect_direct set default true;
+alter table public.intake_setting add column if not exists borrow_price boolean not null default true;   -- 2026-09-30 발주단가
 
 
 -- 취합 한 번 (파일 묶음)
@@ -275,6 +280,30 @@ do $c$ begin
   if not exists (select 1 from pg_constraint where conname = 'intake_order_line_map_status_check') then
     alter table public.intake_order_line add constraint intake_order_line_map_status_check
       check (map_status in ('', 'mapped', 'conflict', 'unmapped', 'nomap', 'none'));
+  end if;
+end $c$;
+-- 2026-09-30 발주단가 (기획서 11.11). 단가가 없으면 세 칸 모두 비운다(단가 없음).
+--   unit_price   — 발주단가(원본 단가 칸 ÷ 가격단위). 0·음수는 받지 않는다(원본의 0 은 단가 없음으로 읽는다)
+--   amount       — 수량 × 단가(소수 둘째 자리 반올림). 단가 없이 금액만 있을 수 없다
+--   price_source — 원본 · 원본(같은 품번) · 직접입력 · 단가표 — 단가가 있을 때만
+--   currency     — 원본 통화 칸(KRW 등). 비면 원화로 본다
+alter table public.intake_order_line add column if not exists unit_price numeric;
+alter table public.intake_order_line add column if not exists amount numeric;
+alter table public.intake_order_line add column if not exists price_source text not null default '';
+alter table public.intake_order_line add column if not exists currency text not null default '';
+do $c$ begin
+  if not exists (select 1 from pg_constraint where conname = 'intake_order_line_unit_price_check') then
+    alter table public.intake_order_line add constraint intake_order_line_unit_price_check
+      check (unit_price is null or unit_price > 0);
+  end if;
+  if not exists (select 1 from pg_constraint where conname = 'intake_order_line_price_source_check') then
+    alter table public.intake_order_line add constraint intake_order_line_price_source_check
+      check (price_source in ('', '원본', '원본(같은 품번)', '직접입력', '단가표')
+             and ((unit_price is null) = (price_source = '')));
+  end if;
+  if not exists (select 1 from pg_constraint where conname = 'intake_order_line_amount_check') then
+    alter table public.intake_order_line add constraint intake_order_line_amount_check
+      check (amount is null or (unit_price is not null and amount = round(qty * unit_price, 2)));
   end if;
 end $c$;
 
@@ -331,6 +360,27 @@ create table if not exists public.part_mapping (
 );
 create index if not exists part_mapping_lookup_idx on public.part_mapping (owner_id, map_group, customer_pn);
 
+-- 단가표·직접입력 단가 (price.js). 원본 파일에 단가가 없는 통합 수주 줄을 채운다 — 원본 단가가 늘 우선.
+--   price_kind  table = 단가표 파일의 한 줄 / manual = 화면 「단가 없음」 목록에 직접 적은 값(단가표보다 우선)
+--   customer    비면 모든 고객사, 있으면 그 고객사 줄에만
+--   item        품목코드 — 고객사 품번 또는 천일품번(대문자·공백 없앤 열쇠)
+create table if not exists public.price_master (
+  id            bigint generated always as identity primary key,
+  owner_id      uuid not null default auth.uid(),
+  price_kind    text not null default 'table' check (price_kind in ('table', 'manual')),
+  customer      text not null default '',
+  item          text not null check (length(btrim(item)) > 0),
+  unit_price    numeric not null check (unit_price > 0),
+  currency      text not null default 'KRW',
+  source_file   text not null default '',
+  source_row    int check (source_row > 0),
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now(),
+  -- ⚠ upsert 시 onConflict: 'owner_id,price_kind,customer,item'
+  constraint price_master_item_key unique (owner_id, price_kind, customer, item)
+);
+create index if not exists price_master_lookup_idx on public.price_master (owner_id, item);
+
 -- ERP 업로드 양식 설정 (upload.js defaultOptions + 넣은 양식의 머리행) — 사용자당 한 행
 create table if not exists public.upload_setting (
   owner_id          uuid primary key default auth.uid(),
@@ -342,12 +392,19 @@ create table if not exists public.upload_setting (
   top_item          text not null default 'blank' check (top_item in ('blank', 'same')),
   name_mode         text not null default 'order' check (name_mode in ('order', 'blank')),
   unmapped          text not null default 'skip' check (unmapped in ('skip', 'keep')),
+  price_col         text not null default 'add' check (price_col in ('add', 'none')),  -- 양식에 단가 열이 없을 때 「수량」 뒤에 「단가」를 더함
   manager           text not null default '',
   parties           jsonb not null default '{}'::jsonb check (jsonb_typeof(parties) = 'object'),  -- {고객사 · 공장 · 구분: {code, name, manager}}
   fixed             jsonb not null default '{}'::jsonb check (jsonb_typeof(fixed) = 'object'),    -- {열 이름: 고정값}
   created_at        timestamptz not null default now(),
   updated_at        timestamptz not null default now()
 );
+alter table public.upload_setting add column if not exists price_col text not null default 'add';   -- 2026-09-30 발주단가
+do $c$ begin
+  if not exists (select 1 from pg_constraint where conname = 'upload_setting_price_col_check') then
+    alter table public.upload_setting add constraint upload_setting_price_col_check check (price_col in ('add', 'none'));
+  end if;
+end $c$;
 
 -- ----------------------------------------------------------------------------
 -- 2. 함수 — search_path 고정
@@ -379,7 +436,7 @@ begin
   foreach t in array array['app_members', 'source_file', 'order_line', 'stock_line', 'shipment_line',
                            'column_mapping', 'app_settings', 'plan_edit', 'ai_note',
                            'intake_setting', 'intake_batch', 'intake_order_line', 'intake_file', 'intake_check',
-                           'part_mapping', 'upload_setting']
+                           'part_mapping', 'upload_setting', 'price_master']
   loop
     execute format('drop trigger if exists %I on public.%I', t || '_updated_at', t);
     execute format('create trigger %I before update on public.%I for each row execute function public.set_updated_at()',
@@ -409,6 +466,7 @@ alter table public.intake_file       enable row level security;
 alter table public.intake_check      enable row level security;
 alter table public.part_mapping      enable row level security;
 alter table public.upload_setting    enable row level security;
+alter table public.price_master      enable row level security;
 
 -- 3-1. 팀 구성원 : 본인 행은 본인이 보고, 전체 목록과 등록·변경·해제는 admin 만
 drop policy if exists app_members_select on public.app_members;
@@ -429,7 +487,7 @@ do $rls$
 declare t text;
 begin
   foreach t in array array['source_file', 'column_mapping', 'app_settings', 'plan_edit', 'ai_note',
-                           'intake_setting', 'intake_batch', 'part_mapping', 'upload_setting']
+                           'intake_setting', 'intake_batch', 'part_mapping', 'upload_setting', 'price_master']
   loop
     execute format('drop policy if exists %I on public.%I', t || '_select', t);
     execute format('drop policy if exists %I on public.%I', t || '_insert', t);

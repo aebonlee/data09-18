@@ -57,12 +57,12 @@ do $t$ begin
   perform public._assert_eq(
     (select count(*)::int from pg_policy p join pg_class c on c.oid = p.polrelid
       join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public'),
-    66, '두 번 적용해도 정책이 66개 그대로다');
+    70, '두 번 적용해도 정책이 70개 그대로다(단가표 price_master 4개 포함)');
   perform public._assert_eq(
     (select count(*)::int from pg_trigger t join pg_class c on c.oid = t.tgrelid
       join pg_namespace n on n.oid = c.relnamespace
       where n.nspname = 'public' and not t.tgisinternal),
-    16, '두 번 적용해도 updated_at 트리거가 16개 그대로다');
+    17, '두 번 적용해도 updated_at 트리거가 17개 그대로다');
   perform public._assert(public.valid_ship_rule('{"0": null, "1": 2, "2": 2, "3": 2, "4": 4, "5": 3, "6": null}'),
     '원문 입고 규칙(월~수 +2, 목 +4, 금 +3)은 올바른 규칙이다');
   perform public._assert(not public.valid_ship_rule('{"1": 61}'),  '61일 뒤 입고 규칙은 틀린 규칙이다');
@@ -228,6 +228,49 @@ begin
     '23514', '통합 수주의 매핑 상태는 정해진 값만 받는다');
 end $t$;
 
+do $t$ begin raise notice '[프로젝트] 발주단가 (기획서 11.11)'; end $t$;
+do $t$
+declare v_b bigint := current_setting('test.a_batch')::bigint;
+begin
+  perform public._assert_eq((select borrow_price from public.intake_setting), true, '단가 칸 없는 줄은 같은 품번 단가로 채우는 것이 기본이다');
+  perform public._assert_eq((select price_col from public.upload_setting), 'add', '업로드 기본값: 양식에 단가 열이 없으면 더한다');
+  insert into public.intake_order_line (batch_id, kind, item, qty, due_date, source_file, source_row, unit_price, amount, price_source, currency)
+    values (v_b, 'CKD', 'SMP-K601', 500, '2026-10-14', '2026.09.29_납품예정CKD건기.xlsx', '2', 1200, 600000, '원본', 'KRW'),
+           (v_b, '엔진', 'SMP-E401', 1, '2026-10-02', '2026.09.29_누적결품 군산엔진.xlsx', '2', 5000, 5000, '원본(같은 품번)', ''),
+           (v_b, '발주서', 'SMP-P822', 3, '2026-11-19', '고객사C_발주서.xlsx', '3', 1500.5, 4501.5, '원본', 'KRW'),
+           (v_b, '엔진', 'SMP-E305', 3, '2026-11-29', '2026.09.29_누적결품 인천엔진.xlsx', '4', null, null, '', '');   -- 단가 없음
+  perform public._assert_eq((select count(*)::int from public.intake_order_line where batch_id = v_b and unit_price is null), 5,
+    '단가 없는 줄(예전 줄 4 + 단가 없음 1)은 세 칸이 모두 비어 있다');
+  perform public._assert_raises(format(
+    $q$insert into public.intake_order_line (batch_id, kind, item, qty, due_date, source_file, source_row, unit_price, amount, price_source) values (%s, '엔진', 'X', 2, '2026-10-01', 'f', '81', 100, 300, '원본')$q$, v_b),
+    '23514', '금액은 수량 × 단가여야 한다');
+  perform public._assert_raises(format(
+    $q$insert into public.intake_order_line (batch_id, kind, item, qty, due_date, source_file, source_row, unit_price, price_source) values (%s, '엔진', 'X', 2, '2026-10-01', 'f', '82', 0, '원본')$q$, v_b),
+    '23514', '단가 0 은 받지 않는다(단가 없음은 비움)');
+  perform public._assert_raises(format(
+    $q$insert into public.intake_order_line (batch_id, kind, item, qty, due_date, source_file, source_row, unit_price) values (%s, '엔진', 'X', 2, '2026-10-01', 'f', '83', 100)$q$, v_b),
+    '23514', '단가가 있으면 출처가 있어야 한다');
+  perform public._assert_raises(format(
+    $q$insert into public.intake_order_line (batch_id, kind, item, qty, due_date, source_file, source_row, amount) values (%s, '엔진', 'X', 2, '2026-10-01', 'f', '84', 200)$q$, v_b),
+    '23514', '단가 없이 금액만 있을 수 없다');
+  perform public._assert_raises(format(
+    $q$insert into public.intake_order_line (batch_id, kind, item, qty, due_date, source_file, source_row, unit_price, amount, price_source) values (%s, '엔진', 'X', 2, '2026-10-01', 'f', '85', 100, 200, '추정')$q$, v_b),
+    '23514', '단가 출처는 원본·원본(같은 품번)·직접입력·단가표만 받는다');
+  insert into public.price_master (price_kind, customer, item, unit_price, source_file, source_row) values
+    ('table', '', 'SMP-G201', 3000, '단가표_예시.xlsx', 4),
+    ('table', '고객사E_발주서', 'SMP-P841', 4400, '단가표_예시.xlsx', 6),
+    ('manual', '', 'SMP-G201', 3300, '', null);   -- 같은 품번이라도 단가표·직접입력은 따로
+  perform public._assert_raises($q$insert into public.price_master (item, unit_price) values ('SMP-G201', 3100)$q$,
+    '23505', '단가표에 같은 고객사·같은 품번은 한 줄만');
+  insert into public.price_master (item, unit_price, source_row) values ('SMP-G201', 3100, 9)
+    on conflict (owner_id, price_kind, customer, item) do update set unit_price = excluded.unit_price;
+  perform public._assert_eq((select unit_price from public.price_master where price_kind = 'table' and item = 'SMP-G201'), 3100::numeric,
+    'upsert(onConflict owner_id,price_kind,customer,item)로 단가를 바꾼다');
+  perform public._assert_raises($q$insert into public.price_master (item, unit_price) values ('X', -1)$q$, '23514', '단가는 양수만');
+  perform public._assert_raises($q$insert into public.price_master (price_kind, item, unit_price) values ('guess', 'X', 1)$q$, '23514', '단가 종류는 table/manual 만');
+  perform public._assert_raises($q$update public.upload_setting set price_col = 'end'$q$, '23514', '단가 열 설정은 add/none 만');
+end $t$;
+
 do $t$ begin raise notice '[프로젝트] 기록성 표(shipment_plan_log)'; end $t$;
 do $t$ begin
   perform public._assert_rows('update public.shipment_plan_log set qty = 0',
@@ -251,7 +294,7 @@ begin
   foreach t in array array['app_members', 'source_file', 'order_line', 'stock_line', 'shipment_line',
                            'column_mapping', 'app_settings', 'plan_edit', 'ai_note', 'shipment_plan_log',
                            'intake_setting', 'intake_batch', 'intake_order_line', 'intake_file', 'intake_check',
-                           'part_mapping', 'upload_setting']
+                           'part_mapping', 'upload_setting', 'price_master']
   loop
     perform public._assert_rows(format('select 1 from public.%I', t), 0, 'B 에게 A 의 ' || t || ' 가 안 보인다');
   end loop;
@@ -284,7 +327,9 @@ begin
   perform public._assert(public.is_member() and not public.is_admin(), 'C 는 구성원이지만 admin 이 아니다');
   perform public._assert_rows('select 1 from public.order_line', 2, 'C 는 A 의 수주 행을 본다(팀 공유)');
   perform public._assert_rows('select 1 from public.shipment_plan_log', 1, 'C 는 A 가 확정한 선적계획 기록을 본다');
-  perform public._assert_rows('select 1 from public.intake_order_line', 4, 'C 는 A 의 통합 수주 표를 본다(팀 공유)');
+  perform public._assert_rows('select 1 from public.intake_order_line', 8, 'C 는 A 의 통합 수주 표를 본다(팀 공유)');
+  perform public._assert_rows('select 1 from public.price_master', 3, 'C 는 A 의 단가표를 본다(팀 공유)');
+  perform public._assert_rows('update public.price_master set unit_price = 1', 0, 'C 는 A 의 단가표를 고칠 수 없다(0행)');
   perform public._assert_rows('update public.intake_order_line set qty = 1', 0, 'C 는 A 의 통합 수주 표를 고칠 수 없다(0행)');
   perform public._assert_rows('select 1 from public.app_members', 1, 'C 는 구성원 명단 중 자기 행만 본다');
   perform public._assert_rows('update public.order_line set qty = 0',
@@ -325,7 +370,7 @@ begin
   foreach t in array array['app_members', 'source_file', 'order_line', 'stock_line', 'shipment_line',
                            'column_mapping', 'app_settings', 'plan_edit', 'ai_note', 'shipment_plan_log',
                            'intake_setting', 'intake_batch', 'intake_order_line', 'intake_file', 'intake_check',
-                           'part_mapping', 'upload_setting']
+                           'part_mapping', 'upload_setting', 'price_master']
   loop
     perform public._assert_rows(format('select 1 from public.%I', t), 0, 'anon 에게 ' || t || ' 가 안 보인다');
   end loop;
@@ -378,6 +423,7 @@ end $t$;
 delete from public.intake_batch;
 delete from public.intake_setting;
 delete from public.part_mapping;
+delete from public.price_master;
 delete from public.upload_setting;
 delete from public.shipment_plan_log;
 delete from public.ai_note;

@@ -3,10 +3,11 @@
 (function () {
   'use strict';
   var L = window.SPLogic, S = window.SPStore, Sample = window.SPSample, I = window.SPIntake, ISample = window.SPIntakeSample;
-  var M = window.SPMapping, U = window.SPUpload;
+  var M = window.SPMapping, U = window.SPUpload, Pr = window.SPPrice;
   var KEYS = ['orders', 'stock', 'shipments'];
   var st = S.load();
   var partMap = S.loadMapping(); // 고객사 품번 → 천일품번 매핑표(이 브라우저에만 저장, 기획서 11.10)
+  var priceTable = S.loadPriceTable(); // 단가표 품목코드 → 단가(이 브라우저에만 저장, 기획서 11.11)
   var pendingSheets = { orders: null, stock: null, shipments: null }; // 방금 연 파일의 시트들(시트 바꾸기용, 저장 안 함)
   var main = document.getElementById('main');
 
@@ -448,7 +449,7 @@
       h('hr', { style: 'border:none;border-top:1px solid var(--line);margin:16px 0' }),
       h('button', { type: 'button', class: 'btn btn-danger', onclick: function () {
         if (!window.confirm('불러온 자료·설정·선적계획 수정·AI 답·수주 취합 결과·품번 매핑표·업로드 양식 설정을 모두 지웁니다. 계속할까요?')) return;
-        S.clear(); S.clearMapping(); partMap = null; st = S.empty(); intakeFiles = null; intakeSide = { stock: null, shipments: null }; save(); render(); toast('모두 지웠습니다');
+        S.clear(); S.clearMapping(); S.clearPriceTable(); partMap = null; priceTable = null; st = S.empty(); intakeFiles = null; intakeSide = { stock: null, shipments: null }; save(); render(); toast('모두 지웠습니다');
       } }, '모두 지우기')));
   }
   function datasetCard(k) {
@@ -666,7 +667,24 @@
     toast('예시 파일 ' + intakeFiles.length + '개로 취합했습니다(가상 데이터)');
   }
   /** 통합 수주에 매핑표를 적용한 결과 {rows, checks, stats} — 저장된 결과에도 매번 새로 적용합니다(매핑표를 바꾸면 바로 반영) */
-  function mappedIntake() { return st.intake ? M.apply(st.intake.rows, partMap, st.mapOpts) : null; }
+  function mappedIntake() {
+    if (!st.intake) return null;
+    var mi = M.apply(st.intake.rows, partMap, st.mapOpts);
+    // 발주단가(기획서 11.11): 원본 → 원본(같은 품번) → 직접입력 → 단가표. 단가표·직접입력을 바꾸면 바로 반영
+    mi.price = Pr.apply(mi.rows, priceTable, st.manualPrices);
+    mi.rows = mi.price.rows;
+    return mi;
+  }
+  function readPriceFile(file) {
+    readFile(file, function (err, book) {
+      if (err) { toast('단가표를 읽지 못했습니다: ' + (err.message || err), true); return; }
+      var p = Pr.parseBook(book);
+      if (!p.stats.pairs) { toast(p.problems[0] || '단가표에서 읽은 단가가 없습니다', true); return; }
+      priceTable = Object.assign(p, { file: file.name, at: new Date().toISOString() });
+      S.savePriceTable(priceTable); render();
+      toast('단가표를 읽었습니다 — 품번 ' + n(p.stats.pairs) + '개' + (p.stats.conflicts ? ' · 단가 충돌 ' + p.stats.conflicts + '건(위쪽 값)' : ''));
+    });
+  }
   function readMappingFile(file) {
     readFile(file, function (err, book) {
       if (err) { toast('매핑표를 읽지 못했습니다: ' + (err.message || err), true); return; }
@@ -695,7 +713,7 @@
     if (!out.count) { toast('내보낼 행이 없습니다(매핑 없는 ' + out.skipped.unmapped + '행은 설정대로 뺐습니다)', true); return; }
     var sheets = {}; sheets[out.sheet] = out.aoa;
     writeXlsx(sheets, '업로드양식_' + st.intake.base + (st.intake.sample ? '_예시데이터' : '') + '.xlsx');
-    toast('업로드 양식 ' + out.count + '행을 내보냈습니다' + (out.skipped.unmapped ? ' · 매핑 없는 ' + out.skipped.unmapped + '행은 뺐습니다' : ''));
+    toast('업로드 양식 ' + out.count + '행을 내보냈습니다' + (out.skipped.unmapped ? ' · 매핑 없는 ' + out.skipped.unmapped + '행은 뺐습니다' : '') + (out.noPrice ? ' · 단가 없음 ' + out.noPrice + '행은 단가 빈칸' : ''));
   }
   function sendIntakeToPlan() {
     var r = st.intake;
@@ -771,6 +789,7 @@
         sel('shortMode', [['increment', '날짜별로 늘어난 만큼 한 줄씩'], ['single', '가장 큰 결품을 첫 결품일 한 줄로']], '누적결품 → 수주 줄 만들기', '누적값이라 날짜별 증가분이 그날의 결품입니다'),
         sel('monthBuckets', [[true, '넣음(그 달 첫날로)'], [false, '넣지 않음(일별 칸만)']], '누적결품의 월 단위 칸(11·12·01월…)'),
         sel('poAllSheets', [[false, '최근 시트만(발주일자가 가장 늦은 시트)'], [true, '모든 시트']], '발주서 파일에 시트가 여럿일 때', '2026-09-30 확정: 괄호 힌트 없는 발주서는 최근 시트만'),
+        sel('borrowPrice', [[true, '같은 품번의 다른 파일 단가로 채움'], [false, '채우지 않음(단가 없음)']], '단가 칸이 없는 줄(누적결품 등)의 발주단가', '같은 고객사·같은 품번 단가가 한 가지일 때만 채웁니다. 두 가지 이상이면 비우고 알립니다'),
         textIn('portalCustomer', '포털 파일 고객사 이름', '건기·엔진·AM·CKD 파일에는 고객사 이름이 없어 여기 적은 이름을 씁니다'),
         textIn('bobcatCustomer', '밥캣 파일 고객사 이름'))));
 
@@ -791,6 +810,9 @@
       h('div', { class: 'kpi' + (mi.stats.unmapped ? ' alert-kpi' : '') }, h('div', { class: 'k' }, '천일품번 매핑'),
         h('div', { class: 'v' }, mi.stats.loaded ? n(mi.stats.mapped + mi.stats.conflict) + '행' : '매핑표 없음'),
         h('div', { class: 's' }, mi.stats.loaded ? '매핑 없음 ' + n(mi.stats.unmappedItems) + '품번(' + n(mi.stats.unmapped) + '행) · 대상 아님 ' + n(mi.stats.none) + '행' : '위 3번에 매핑표를 넣어 주세요')),
+      h('button', { type: 'button', class: 'kpi kpi-btn' + (mi.price.stats.none ? ' alert-kpi' : ''), onclick: function () { var el = document.getElementById('intake-price'); if (el) el.scrollIntoView({ behavior: 'smooth' }); } },
+        h('div', { class: 'k' }, '발주단가'), h('div', { class: 'v' }, n(mi.price.stats.has) + '행'),
+        h('div', { class: 's' }, mi.price.stats.none ? '단가 없음 ' + n(mi.price.stats.none) + '행(' + n(mi.price.stats.noneItems) + '품번)' : '모든 줄에 단가가 있습니다')),
       h('button', { type: 'button', class: 'kpi kpi-btn' + (sum.checks ? ' alert-kpi' : ''), onclick: function () { var el = document.getElementById('intake-checks'); if (el) el.scrollIntoView({ behavior: 'smooth' }); } }, h('div', { class: 'k' }, '★확인 필요'), h('div', { class: 'v' }, n(sum.checks) + '건'), h('div', { class: 's' }, sum.checks ? '아래 목록을 확인해 주세요' : '없습니다'))));
 
     main.appendChild(h('div', { class: 'card' }, h('h2', null, '4. 결과 쓰기'),
@@ -798,11 +820,12 @@
         h('button', { type: 'button', class: 'btn btn-primary', onclick: sendIntakeToPlan, disabled: r.rows.length ? null : true }, '이 수주로 선적계획 계산'),
         h('button', { type: 'button', class: 'btn', onclick: function () {
           var sheets = I.exportSheets({ rows: mi.rows, files: r.files, checks: allChecks, stock: intakeSide.stock, shipments: intakeSide.shipments });
+          sheets['단가없음'] = Pr.missingAoa(mi.price.missing);
           writeXlsx(sheets, '수주취합_' + r.base + (r.sample ? '_예시데이터' : '') + '.xlsx');
         } }, '통합 수주 Excel 내려받기'),
         h('button', { type: 'button', class: 'btn', onclick: exportUpload, disabled: r.rows.length ? null : true }, '업로드 양식으로 내보내기')),
       h('p', { class: 'note', style: 'margin-top:8px' }, '「이 수주로 선적계획 계산」은 통합 수주를 ' + (mi.stats.loaded ? '천일품번으로 바꿔 ' : '') + '입력 ① 수주현황으로, 선적계획 파일(' + (r.shipCount || 0) + '행)은 입력 ③ 선적예정으로, 창고별재고현황(' + (r.stockCount || 0) + '행)은 입력 ② 재고현황으로 넘기고 기준일을 맞춘 뒤 대시보드로 갑니다. 넣지 않은 자료는 지금 들어 있는 것을 그대로 둡니다.'),
-      h('p', { class: 'note' }, 'Excel 시트: 통합수주 · 파일별집계 · ★확인필요 · 수주현황(이 도구 표준 열)' + (intakeSide.stock ? ' · 재고현황' : '') + (intakeSide.shipments ? ' · 선적예정' : '') + '. 「업로드 양식으로 내보내기」는 아래 5번 설정대로 시트「' + uploadTemplate().sheet + '」 ' + uploadTemplate().headers.length + '열을 씁니다.')));
+      h('p', { class: 'note' }, 'Excel 시트: 통합수주(발주단가·금액·단가 출처 포함) · 파일별집계 · ★확인필요 · 수주현황(이 도구 표준 열) · 단가없음' + (intakeSide.stock ? ' · 재고현황' : '') + (intakeSide.shipments ? ' · 선적예정' : '') + '. 「업로드 양식으로 내보내기」는 아래 5번 설정대로 시트「' + uploadTemplate().sheet + '」 ' + uploadTemplate().headers.length + '열을 씁니다.')));
 
     // ★확인 필요 — 매핑 없음
     if (mi.stats.loaded) main.appendChild(h('div', { class: 'card', id: 'intake-unmapped' }, h('h2', null, '★확인 필요 — 매핑 없음 ' + unmappedChecks.length + '건'),
@@ -812,13 +835,17 @@
         h('tbody', null, unmappedChecks.map(function (c) { return h('tr', null, h('td', null, M.GROUPS[c.group].label), h('td', { class: 'nowrap' }, h('strong', null, c.item)), h('td', null, c.detail), h('td', null, c.file)); }))))
         : h('p', { class: 'note' }, '매핑표에 없는 품번이 없습니다.')));
 
+    main.appendChild(priceCard(mi));
+
     // 파일별 집계
+    var pbs = mi.price.stats.bySource;
     main.appendChild(h('div', { class: 'card' }, h('h2', null, '파일별 결과 ' + r.files.length + '개'),
       h('div', { class: 'table-wrap' }, h('table', { class: 'list' },
-        h('thead', null, h('tr', null, ['원본파일', '판별', '고객사 · 공장 · 구분', '읽은 행', '수집', '규칙으로 뺀 행(사유)', '메모'].map(function (x, i) { return h('th', { class: i >= 3 && i <= 4 ? 'num' : null }, x); }))),
+        h('thead', null, h('tr', null, ['원본파일', '판별', '고객사 · 공장 · 구분', '읽은 행', '수집', '단가 있음 / 없음', '규칙으로 뺀 행(사유)', '메모'].map(function (x, i) { return h('th', { class: i >= 3 && i <= 5 ? 'num' : null }, x); }))),
         h('tbody', null, r.files.map(function (f) {
           return h('tr', null, h('td', null, f.file), h('td', null, f.typeLabel), h('td', null, [f.customer, f.plant, f.group].filter(Boolean).join(' · ')),
             h('td', { class: 'num' }, n(f.read)), h('td', { class: 'num' }, n(f.collected)),
+            h('td', { class: 'num nowrap' }, pbs[f.file] ? n(pbs[f.file].has) + ' / ' + n(pbs[f.file].none) : '-'),
             h('td', null, Object.keys(f.excluded).map(function (k) { return h('span', { class: 'tag' }, k + ' ' + f.excluded[k]); })),
             h('td', { class: 'note' }, f.notes.join(' / ')));
         }))))));
@@ -845,15 +872,17 @@
         return (!intakeFilter.group || x.group === intakeFilter.group) && (!intakeFilter.q || (x.item + ' ' + x.company + ' ' + x.customer + ' ' + x.source + ' ' + (x.name || '')).toLowerCase().indexOf(intakeFilter.q) >= 0);
       });
       holder.textContent = '';
-      holder.appendChild(h('div', { class: 'list-meta' }, h('span', null, rows.length + '행 · 수량 ' + n(rows.reduce(function (s, x) { return s + x.qty; }, 0))), rows.length > LIMIT ? h('span', { class: 'note' }, '화면에는 앞 ' + LIMIT + '행만 보입니다 — 전체는 Excel 로 내려받아 주세요') : null));
+      holder.appendChild(h('div', { class: 'list-meta' }, h('span', null, rows.length + '행 · 수량 ' + n(rows.reduce(function (s, x) { return s + x.qty; }, 0)) + ' · 금액(단가 있는 줄) ' + n(Math.round(rows.reduce(function (s, x) { return s + (x.amount || 0); }, 0)))), rows.length > LIMIT ? h('span', { class: 'note' }, '화면에는 앞 ' + LIMIT + '행만 보입니다 — 전체는 Excel 로 내려받아 주세요') : null));
       if (!rows.length) { holder.appendChild(h('p', { class: 'empty' }, '조건에 맞는 행이 없습니다.')); return; }
       holder.appendChild(h('div', { class: 'table-wrap' }, h('table', { class: 'list' },
-        h('thead', null, h('tr', null, ['고객사', '공장', '구분', '품목코드', '천일품번', '수량', '납기일', '발주일', '원본파일 / 행', '비고'].map(function (x) { return h('th', { class: x === '수량' ? 'num' : null }, x); }))),
+        h('thead', null, h('tr', null, ['고객사', '공장', '구분', '품목코드', '천일품번', '수량', '발주단가', '금액', '납기일', '발주일', '원본파일 / 행', '비고'].map(function (x) { return h('th', { class: x === '수량' || x === '발주단가' || x === '금액' ? 'num' : null }, x); }))),
         h('tbody', null, rows.slice(0, LIMIT).map(function (x) {
           return h('tr', null, h('td', null, x.customer), h('td', null, x.plant), h('td', null, x.group), h('td', { class: 'nowrap' }, x.item),
             h('td', { class: 'nowrap' }, h('strong', null, x.company), x.mapStatus === 'unmapped' || x.mapStatus === 'conflict' ? h('span', { class: 'tag warn' }, M.STATUS_LABEL[x.mapStatus]) : null),
-            h('td', { class: 'num' }, n(x.qty)), h('td', { class: 'nowrap' }, L.fmtDate(x.due)), h('td', { class: 'nowrap' }, x.orderDate || ''),
-            h('td', null, x.source + (x.sheet && x.sheet !== 'sheet1' && x.sheet !== 'Sheet1' ? ' · ' + x.sheet : '') + ' · ' + x.row), h('td', { class: 'note' }, [x.rule, x.note].filter(Boolean).join(' · ')));
+            h('td', { class: 'num' }, n(x.qty)),
+            h('td', { class: 'num nowrap' }, x.price == null ? h('span', { class: 'tag warn' }, '단가 없음') : [n(x.price), x.priceSrc && x.priceSrc !== '원본' ? h('span', { class: 'tag' }, x.priceSrc) : null]),
+            h('td', { class: 'num' }, x.amount == null ? '' : n(x.amount)), h('td', { class: 'nowrap' }, L.fmtDate(x.due)), h('td', { class: 'nowrap' }, x.orderDate || ''),
+            h('td', null, x.source + (x.sheet && x.sheet !== 'sheet1' && x.sheet !== 'Sheet1' ? ' · ' + x.sheet : '') + ' · ' + x.row), h('td', { class: 'note' }, [x.rule, x.note, x.priceNote].filter(Boolean).join(' · ')));
         })))));
     }
     gsel.addEventListener('change', draw); q.addEventListener('input', draw);
@@ -907,6 +936,50 @@
       } }, '매핑표 지우기')) : null);
   }
 
+  // 발주단가 카드 (기획서 11.11): 출처별 개수 · 단가표 · 단가 없음 목록(직접입력)
+  function priceCard(mi) {
+    var ps = mi.price.stats, miss = mi.price.missing, LIM = 200;
+    var input = h('input', { type: 'file', accept: '.xlsx,.xls,.xlsm,.csv', 'aria-label': '단가표 파일' });
+    input.addEventListener('change', function () { if (input.files[0]) readPriceFile(input.files[0]); });
+    function setManual(k, v) {
+      var m = Object.assign({}, st.manualPrices), x = Pr.num(v);
+      if (x && x > 0) m[k] = x; else delete m[k];
+      st.manualPrices = m; save(); render();
+    }
+    var srcText = Pr.SRC_ORDER.map(function (k) { return k + ' ' + n(ps.bySrc[k] || 0); }).join(' · ');
+    var tableInfo = Pr.has(priceTable)
+      ? h('p', { class: 'note' }, '넣은 단가표: ' + (priceTable.file || '') + ' — 품번 ' + n(priceTable.stats.pairs) + '개' + (priceTable.stats.blank ? ' · 빈 칸 ' + n(priceTable.stats.blank) + '행' : '') + (priceTable.stats.bad ? ' · 숫자가 아닌 단가 ' + n(priceTable.stats.bad) + '행' : '') + (priceTable.stats.conflicts ? ' · 단가 충돌 ' + n(priceTable.stats.conflicts) + '건(위쪽 값)' : '') + (ps.tableDiff ? ' · 원본 단가와 다른 품번 ' + n(ps.tableDiff) + '개(원본을 씀)' : ''))
+      : h('p', { class: 'note' }, '단가표가 없습니다. 원본에 단가가 없는 줄은 비워 둡니다.');
+    return h('div', { class: 'card', id: 'intake-price' }, h('h2', null, '발주단가 — 단가 없음 ' + n(ps.none) + '행 (' + n(ps.noneItems) + '품번)'),
+      h('p', { class: 'note' }, '단가는 원본 파일의 단가 칸(포털·밥캣 「발주단가」, 발주서 「단가」「발주단가」, PDF 「단가」)을 먼저 쓰고, 단가 칸이 없는 줄은 같은 품번의 다른 파일 단가 → 아래에 직접 적은 값 → 단가표 순서로 채웁니다. 금액 = 수량 × 단가. 단가표·직접 적은 값은 이 브라우저에만 저장합니다.'),
+      h('p', null, h('strong', null, '단가 출처: '), srcText + ' · 단가 없음 ' + n(ps.none) + ' · 금액 합계 ' + n(Math.round(ps.amount))),
+      h('div', { class: 'form-grid' },
+        h('label', { class: 'field' }, h('span', null, Pr.has(priceTable) ? '단가표 다시 넣기' : '단가표 넣기(선택)'), input,
+          h('small', null, '열: 품목코드(품번·천일품번·자재코드) | 단가(발주단가). 「고객사」 열이 있으면 그 고객사 줄에만 씁니다. 고객사 품번·천일품번 어느 쪽으로 적어도 찾습니다.'),
+          Pr.has(priceTable) ? null : h('button', { type: 'button', class: 'btn', style: 'margin-top:6px', onclick: function () {
+            priceTable = Object.assign(Pr.parseBook(ISample.priceBook()), { file: '예시 단가표(가상 품번·가상 단가)', at: new Date().toISOString() });
+            S.savePriceTable(priceTable); render(); toast('예시 단가표를 넣었습니다 — 실제 단가표를 넣으면 바뀝니다');
+          } }, '예시 단가표로 해 보기'))),
+      tableInfo,
+      Pr.has(priceTable) ? h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn btn-danger', onclick: function () {
+        if (!window.confirm('이 브라우저에 저장된 단가표를 지웁니다. 계속할까요?')) return;
+        S.clearPriceTable(); priceTable = null; render(); toast('단가표를 지웠습니다');
+      } }, '단가표 지우기')) : null,
+      miss.length ? h('div', { class: 'table-wrap', style: 'margin-top:12px' }, h('table', { class: 'list' },
+        h('thead', null, h('tr', null, ['고객사', '고객사 품번', '천일품번', '행 수', '수량', '원본파일', '단가 직접입력'].map(function (x, i) { return h('th', { class: i === 3 || i === 4 ? 'num' : null }, x); }))),
+        h('tbody', null, miss.slice(0, LIM).map(function (m) {
+          var inp = h('input', { type: 'text', inputmode: 'decimal', value: st.manualPrices[m.key] == null ? '' : String(st.manualPrices[m.key]), 'aria-label': m.item + ' 단가', style: 'max-width:120px', onchange: function () { setManual(m.key, inp.value); } });
+          return h('tr', null, h('td', null, m.customer), h('td', { class: 'nowrap' }, h('strong', null, m.item)), h('td', { class: 'nowrap' }, m.company !== m.item ? m.company : ''),
+            h('td', { class: 'num' }, n(m.rows)), h('td', { class: 'num' }, n(m.qty)), h('td', { class: 'note' }, m.files.join(', ') + (m.note ? ' · ' + m.note : '')), h('td', null, inp));
+        }))))
+        : h('p', { class: 'note' }, '모든 줄에 단가가 있습니다.'),
+      miss.length > LIM ? h('p', { class: 'note' }, '화면에는 수량이 큰 ' + LIM + '품번만 보입니다 — 전체는 Excel 의 「단가없음」 시트로 확인해 주세요') : null,
+      ps.manualCount ? h('div', { class: 'btn-row', style: 'margin-top:8px' }, h('button', { type: 'button', class: 'btn', onclick: function () {
+        if (!window.confirm('직접 적은 단가 ' + ps.manualCount + '개를 지웁니다. 계속할까요?')) return;
+        st.manualPrices = {}; save(); render();
+      } }, '직접 적은 단가 지우기(' + ps.manualCount + '개)')) : null);
+  }
+
   // 5. ERP 업로드 양식 카드
   function uploadCard(mi) {
     var o = st.uploadOpts, tpl = uploadTemplate();
@@ -941,6 +1014,7 @@
       return h('tr', null, h('td', null, col), h('td', null, i));
     });
     var preview = U.build(mi.rows, tpl, o, { today: L.todayIso(), base: st.intake.base });
+    var outH = preview.headers || tpl.headers;
     return h('div', { class: 'card', id: 'upload-template' }, h('h2', null, '5. ERP 업로드 양식'),
       h('p', { class: 'note' }, '「업로드 양식으로 내보내기」는 양식의 열 순서 그대로 시트「' + tpl.sheet + '」를 씁니다. ' + (st.uploadTpl ? '넣은 양식: ' + st.uploadTpl.fileName + '.' : '지금은 내장 기본 양식(웹자료올리기 17열 머리행)입니다. 회사 양식 파일을 넣으면 그 열 순서를 따릅니다.')),
       h('div', { class: 'form-grid' },
@@ -951,16 +1025,17 @@
         sel('topItem', [['blank', '비움'], ['same', '품목코드(천일품번)와 같게']], '「품목코드(상단)」 열'),
         sel('nameMode', [['order', '수주 파일의 품명'], ['blank', '비움(ERP 가 품목코드로 채움)']], '「품목명」 열'),
         sel('unmapped', [['skip', '빼고 내보냄'], ['keep', '고객사 품번 그대로 내보냄']], '매핑 없는 품번', '틀린 품목코드가 ERP 에 올라가지 않도록 기본은 뺍니다'),
+        sel('priceCol', [['add', '「수량」 뒤에 「단가」 열을 더함'], ['none', '더하지 않음(양식 그대로)']], '양식에 단가 열이 없을 때', '받은 양식(17열)에는 단가 열이 없습니다. 확인 부탁: ERP 가 열이 하나 늘어도 받는지, 단가 열 이름·위치가 따로 있는지. 양식에 「단가」「금액」 열이 있으면 그 열에 채웁니다'),
         h('label', { class: 'field' }, h('span', null, '기본 담당자'), mgr, h('small', null, '납품처 표에 담당자가 없을 때 씁니다'))),
       h('h3', { style: 'margin-top:16px' }, '납품처 설정표 (고객사 · 공장 · 구분 → 납품처 코드·납품처명·담당자)'),
       keys.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'list' }, h('thead', null, h('tr', null, ['통합 수주의 고객사 · 공장 · 구분', '납품처 코드', '납품처명', '담당자'].map(function (x) { return h('th', null, x); }))), h('tbody', null, partyRows)))
         : h('p', { class: 'note' }, '통합 수주가 없습니다.'),
       h('h3', { style: 'margin-top:16px' }, '고정값 (자동으로 채우지 않는 열 — 비우면 빈칸)'),
       fixedRows.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'list' }, h('thead', null, h('tr', null, h('th', null, '열'), h('th', null, '모든 행에 넣을 값'))), h('tbody', null, fixedRows))) : null,
-      h('details', { style: 'margin-top:12px' }, h('summary', null, '열마다 무엇으로 채우는지 (' + tpl.headers.length + '열)'),
+      h('details', { style: 'margin-top:12px' }, h('summary', null, '열마다 무엇으로 채우는지 (' + outH.length + '열' + (preview.added && preview.added.length ? ' — 양식 ' + tpl.headers.length + '열 + 더한 「' + preview.added.join('」「') + '」' : '') + ')'),
         h('div', { class: 'table-wrap' }, h('table', { class: 'list' }, h('thead', null, h('tr', null, h('th', null, '순서'), h('th', null, '열'), h('th', null, '채우는 값'))),
-          h('tbody', null, tpl.headers.map(function (col, i) { var f = U.fieldOf(col); return h('tr', null, h('td', { class: 'num' }, String(i + 1)), h('td', null, col), h('td', { class: 'note' }, f ? U.FIELD_LABEL[f] : (o.fixed[col] ? '고정값 「' + o.fixed[col] + '」' : '빈칸'))); }))))),
-      h('p', { class: 'note', style: 'margin-top:8px' }, '지금 설정으로 ' + n(preview.count) + '행' + (preview.skipped.unmapped ? ' (매핑 없는 ' + n(preview.skipped.unmapped) + '행 뺌)' : '') + '. 모든 행이 빈 열: ' + (preview.blankCols.length ? preview.blankCols.join(', ') : '없음') + '.'),
+          h('tbody', null, outH.map(function (col, i) { var f = U.fieldOf(col), added = (preview.added || []).indexOf(col) >= 0 && tpl.headers.indexOf(col) < 0; return h('tr', null, h('td', { class: 'num' }, String(i + 1)), h('td', null, col, added ? h('span', { class: 'tag' }, '더한 열') : null), h('td', { class: 'note' }, f ? U.FIELD_LABEL[f] : (o.fixed[col] ? '고정값 「' + o.fixed[col] + '」' : '빈칸'))); }))))),
+      h('p', { class: 'note', style: 'margin-top:8px' }, '지금 설정으로 ' + n(preview.count) + '행' + (preview.skipped.unmapped ? ' (매핑 없는 ' + n(preview.skipped.unmapped) + '행 뺌)' : '') + (preview.noPrice ? ' · 단가 없음 ' + n(preview.noPrice) + '행은 단가 빈칸' : '') + '. 모든 행이 빈 열: ' + (preview.blankCols.length ? preview.blankCols.join(', ') : '없음') + '.'),
       h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn btn-primary', onclick: exportUpload, disabled: preview.count ? null : true }, '업로드 양식으로 내보내기'),
         st.uploadTpl ? h('button', { type: 'button', class: 'btn', onclick: function () { st.uploadTpl = null; save(); render(); toast('내장 기본 양식으로 되돌렸습니다'); } }, '내장 기본 양식으로') : null));
   }
