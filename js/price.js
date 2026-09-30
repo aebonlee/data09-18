@@ -53,7 +53,9 @@
 
   /* 매입단가표 읽기. book = { names, sheets:{시트: aoa} }
      반환 { map:{품목코드 열쇠: {price, maker, row, sheet}}, conflicts:{열쇠:[{price, maker, row}…]}, stats:{rows, pairs, blank, bad, dupSame, conflicts, makers}, problems:[], sheets:[] }
-     같은 품목코드가 여러 번이면 위쪽 행 값을 쓰고, 단가나 생산처가 다르면 「단가 충돌」로 셉니다 */
+     같은 품목코드가 여러 번이면 위쪽 행 값을 쓰고, 단가나 생산처가 다르면 「단가 충돌」로 셉니다.
+     2026-09-30 네 번째 답변으로 확정: 「현재 생산처 이원화로 진행되지만 향후(1개월 이내) 품번별 생산처는 1곳으로 지정되기 때문에
+     현재 기준 가장 위쪽 단가로 해도 무방합니다」 — 고르는 화면 없이 위쪽 행 값을 쓰고, 여럿이었던 품목은 목록으로만 보여 줍니다 */
   function parseBook(book) {
     var out = { map: {}, conflicts: {}, stats: { rows: 0, pairs: 0, blank: 0, bad: 0, dupSame: 0, conflicts: 0, makers: 0 }, problems: [], sheets: [] };
     var names = (book && book.names) || [], makers = {};
@@ -111,11 +113,12 @@
       total: rows.length, buyHas: 0, buyNone: 0, buyBySrc: {}, buyNoneItems: 0, buyAmount: 0,
       saleHas: 0, saleNone: 0, saleBySrc: {}, saleAmount: 0,
       both: 0, marginAmount: 0, negative: 0, negativeItems: 0,
-      tableLoaded: has(table), manualCount: 0, manualShadowed: 0, bySource: {}
+      tableLoaded: has(table), manualCount: 0, manualShadowed: 0, bySource: {},
+      buyMultiRows: 0, buyMultiItems: 0
     };
     BUY_ORDER.forEach(function (s) { stats.buyBySrc[s] = 0; });
     SALE_ORDER.forEach(function (s) { stats.saleBySrc[s] = 0; });
-    var miss = {}, neg = {};
+    var miss = {}, neg = {}, multi = {};
     var out = rows.map(function (r) {
       var x = Object.assign({}, r), k = buyKey(r);
       // 판매단가(고객 발주, 참고)
@@ -125,7 +128,11 @@
       else { stats.saleHas++; bs.sale++; stats.saleBySrc[x.priceSrc || SALE_SRC.source] = (stats.saleBySrc[x.priceSrc || SALE_SRC.source] || 0) + 1; stats.saleAmount += x.saleAmount; }
       // 매입단가(생산처 발주): 단가표 → 직접입력
       var t = lookup(table, r), m = num(manual[k]);
-      if (t) { x.buyPrice = t.price; x.buySrc = BUY_SRC.table; x.maker = t.maker || ''; }
+      x.buyMulti = false;
+      if (t) {
+        x.buyPrice = t.price; x.buySrc = BUY_SRC.table; x.maker = t.maker || '';
+        if (table.conflicts && table.conflicts[k]) { x.buyMulti = true; stats.buyMultiRows++; multi[k] = 1; }   // 단가가 여럿 → 위쪽 값(확정)
+      }
       else if (m != null && m > 0) { x.buyPrice = m; x.buySrc = BUY_SRC.manual; x.maker = ''; }
       else { x.buyPrice = null; x.buySrc = ''; x.maker = ''; }
       x.buyAmount = amount(x.qty, x.buyPrice);
@@ -149,6 +156,7 @@
     });
     ['buyAmount', 'saleAmount', 'marginAmount'].forEach(function (f) { stats[f] = round2(stats[f]); });
     stats.negativeItems = Object.keys(neg).length;
+    stats.buyMultiItems = Object.keys(multi).length;
     Object.keys(manual).forEach(function (k) {
       if (!(num(manual[k]) > 0)) return;
       stats.manualCount++;
@@ -168,6 +176,20 @@
     });
     return Object.keys(m).filter(function (k) { return m[k].length > 1; }).length;
   }
+  /** 매입단가표에서 단가·생산처가 둘 이상인 품목 목록(쓴 값 = 가장 위쪽 행).
+      rows(apply 결과 행)를 주면 이번 수주에 나오는 품목만, 행 수와 함께. 품목코드 순 */
+  function multiList(t, rows) {
+    if (!t || !t.conflicts) return [];
+    var cnt = null;
+    if (rows) { cnt = {}; rows.forEach(function (r) { if (r.buyMulti) { var k = buyKey(r); cnt[k] = (cnt[k] || 0) + 1; } }); }
+    return Object.keys(t.conflicts).filter(function (k) { return !cnt || cnt[k]; }).sort().map(function (k) {
+      var list = t.conflicts[k], top = t.map[k] || list[0];
+      return {
+        key: k, price: top.price, maker: top.maker || '', row: top.row, rows: cnt ? cnt[k] : '',
+        others: list.filter(function (x) { return x.row !== top.row; }).map(function (x) { return x.price + (x.maker ? ' · ' + x.maker : '') + ' · ' + x.row + '행'; }).join(' / ')
+      };
+    });
+  }
   /** 「매입단가 없음」 목록 → Excel 시트 */
   function missingAoa(missing) {
     return [['품목코드', '고객사 품번', '품목명', '고객사', '구분', '행 수', '수량 합계', '원본파일']].concat(missing.map(function (m) {
@@ -182,6 +204,6 @@
   return {
     SALE_SRC: SALE_SRC, SALE_ORDER: SALE_ORDER, BUY_SRC: BUY_SRC, BUY_ORDER: BUY_ORDER,
     key: key, num: num, findCols: findCols, parseBook: parseBook, has: has, lookup: lookup, buyKey: buyKey,
-    amount: amount, apply: apply, sourceDisagreements: sourceDisagreements, missingAoa: missingAoa, templateAoa: templateAoa
+    amount: amount, apply: apply, multiList: multiList, sourceDisagreements: sourceDisagreements, missingAoa: missingAoa, templateAoa: templateAoa
   };
 });

@@ -38,7 +38,7 @@
 --    intake_order_line 의 unit_price · amount · price_source — 판매단가(고객 발주, 참고): 고객사 파일의 단가 칸 · 판매금액 · 출처
 --    intake_order_line 의 buy_price · buy_amount · buy_source · maker — 매입단가(생산처 발주): 당사 → 생산처 발주단가 · 매입금액 · 출처 · 생산처
 --    price_master       — 매입단가표(천일품번 → 매입단가 · 생산처, 2026-09-30 확정)와 화면에서 직접 적은 매입단가. 고객 발주 단가와 무관
---    intake_monthly_summary (뷰) — 월별 수주 vs 매입(납기월·발주월 × 수주금액·매입금액·단가 없음 행 수·차액·차익률), 기획서 11.13
+--    intake_monthly_summary (뷰) — 월별 수주 vs 매입(납기월(확정)·발주월 × 수주금액·매입금액·단가 없음 행 수·비중·차액·차익률), 기획서 11.13·11.14
 --
 --  접근 규칙
 --    · 자료는 올린 사람(owner_id)만 쓰고 고친다.
@@ -361,7 +361,9 @@ select owner_id, batch_id, month_basis, month,
        count(*) filter (where sale_amt is not null and buy_amt is not null)::int as both_rows,
        sum(sale_amt - buy_amt) filter (where sale_amt is not null and buy_amt is not null) as diff,
        round(sum(sale_amt - buy_amt) filter (where sale_amt is not null and buy_amt is not null) * 100
-             / nullif(sum(sale_amt) filter (where sale_amt is not null and buy_amt is not null), 0), 1) as rate
+             / nullif(sum(sale_amt) filter (where sale_amt is not null and buy_amt is not null), 0), 1) as rate,
+       -- 비중(기획서 11.14) = 발주(매입)금액 합계 ÷ 수주금액 합계 × 100 — 단가가 한쪽만 있는 줄도 그쪽 합계에 넣음
+       round(coalesce(sum(buy_amt), 0) * 100 / nullif(sum(sale_amt), 0), 1)  as share
 from m
 group by owner_id, batch_id, month_basis, month;
 revoke all on public.intake_monthly_summary from public, anon;

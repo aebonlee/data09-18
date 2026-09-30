@@ -6,7 +6,13 @@
    차액·차익률은 두 단가가 모두 있는 줄끼리만 비교합니다(한쪽만 있는 줄을 섞으면 차액이 부풀거나 줄어들기 때문).
      차액   = (둘 다 있는 줄의) 수주금액 − 매입금액
      차익률 = 차액 ÷ (둘 다 있는 줄의) 수주금액 × 100
-   월 기준은 납기월(기본) 또는 발주월. 날짜가 없는 줄은 「(납기일 없음)」「(발주일 없음)」 한 칸에 모읍니다.
+   2026-09-30 네 번째 답변(기획서 11.14):
+     총금액 비교 — 단가가 없더라도 「10월 수주금액 ****원 · 10월 발주금액 ****원 · 수주금액 대비 발주금액 **%(비중)」.
+       발주금액 = 매입금액(당사 → 생산처 발주). 비중 = 발주금액 합계 ÷ 수주금액 합계 × 100 — 줄마다 두 단가가 다 있는지와 상관없이
+       그 달의 모든 금액을 더해 나눕니다. 대신 쪽마다 「단가 없음」 행 수를 옆에 붙여 합계를 어떻게 읽을지 알 수 있게 합니다.
+     차액·차익률(둘 다 있는 줄)은 보조 정보로 남깁니다.
+     월 기준은 납기월로 확정(기본). 발주월 선택은 참고용으로 남겨 둡니다.
+   월 기준은 납기월(기본·확정) 또는 발주월. 날짜가 없는 줄은 「(납기일 없음)」「(발주일 없음)」 한 칸에 모읍니다.
    입력 행은 SPPrice.apply 를 거친 통합 수주 행(price · buyPrice · qty · due · orderDate · customer · group · company · item · name).
    브라우저(window.SPMonthly)와 node(require) 양쪽에서 씁니다. */
 (function (root, factory) {
@@ -21,6 +27,7 @@
   function round1(x) { return Math.round(x * 10) / 10; }
 
   var BY = { due: '납기월', order: '발주월' };
+  var BY_FIXED = 'due';   // 2026-09-30 네 번째 답변: 「납기월 기준으로 부탁드립니다」
   var NO_DATE = { due: '(납기일 없음)', order: '(발주일 없음)' };
   var DEFAULT_TOP = 20;
 
@@ -53,6 +60,7 @@
     ['sale', 'buy', 'bothSale', 'bothBuy'].forEach(function (k) { a[k] = round2(a[k]); });
     a.diff = a.bothRows ? round2(a.bothSale - a.bothBuy) : null;
     a.rate = a.bothRows && a.bothSale > 0 ? round1(a.diff / a.bothSale * 100) : null;
+    a.share = a.sale > 0 ? round1(a.buy / a.sale * 100) : null;   // 비중 = 발주(매입)금액 ÷ 수주금액 × 100, 모든 줄 합계끼리
     return a;
   }
   function groupKey(r) { return [str(r.customer) || '(고객사 없음)', str(r.group) || '(구분 없음)'].join(' · '); }
@@ -103,16 +111,35 @@
     return { by: o.by, byLabel: BY[o.by], topN: o.topN, months: list, total: close(total) };
   }
 
+  var SHARE_NOTE = '비중 = 발주금액(매입) 합계 ÷ 수주금액 합계 × 100. 단가가 없는 줄은 그쪽 합계에서 빠지므로 「단가 없음」 행 수와 함께 읽어 주세요.';
   var NOTE = '차액·차익률은 판매단가(수주)와 매입단가가 둘 다 있는 줄끼리 계산합니다. 한쪽 단가가 없는 줄은 그쪽 금액 합계에 들어가지 않으니 「단가 없음」 행 수를 함께 보세요.';
-  var HEAD = ['행 수', '수량', '수주금액', '수주단가 없음(행)', '매입금액', '매입단가 없음(행)', '비교한 행(둘 다 있음)', '차액(둘 다 있는 줄)', '차익률(%)'];
-  function cells(a) { return [a.rows, a.qty, a.sale, a.saleNone, a.buy, a.buyNone, a.bothRows, a.diff == null ? '' : a.diff, a.rate == null ? '' : a.rate]; }
+  var HEAD = ['행 수', '수량', '수주금액', '수주단가 없음(행)', '발주금액(매입)', '매입단가 없음(행)', '비중(발주÷수주, %)', '비교한 행(둘 다 있음)', '차액(둘 다 있는 줄)', '차익률(%)'];
+  function cells(a) { return [a.rows, a.qty, a.sale, a.saleNone, a.buy, a.buyNone, a.share == null ? '' : a.share, a.bothRows, a.diff == null ? '' : a.diff, a.rate == null ? '' : a.rate]; }
+  var TOTAL_HEAD = ['수주금액', '발주금액(매입)', '비중(발주÷수주, %)', '수주단가 없음(행)', '매입단가 없음(행)', '행 수'];
+  function totalCells(a) { return [a.sale, a.buy, a.share == null ? '' : a.share, a.saleNone, a.buyNone, a.rows]; }
+  function fmt(v) { return Math.round(v).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+  /** 한 달 한 줄 문장 — 「2026-10 수주금액 2,000원 · 발주금액 980원 · 수주금액 대비 발주금액 49.0%」 (+ 단가 없음 행) */
+  function sentence(a) {
+    var s = a.label + ' 수주금액 ' + fmt(a.sale) + '원 · 발주금액 ' + fmt(a.buy) + '원 · 수주금액 대비 발주금액 ' + (a.share == null ? '-' : a.share.toFixed(1) + '%');
+    var miss = [];
+    if (a.saleNone) miss.push('수주단가 없음 ' + a.saleNone + '행');
+    if (a.buyNone) miss.push('매입단가 없음 ' + a.buyNone + '행');
+    return miss.length ? s + ' (' + miss.join(' · ') + ')' : s;
+  }
 
   /** Excel 시트 「월별 수주 vs 매입」 — 월별 표 · 고객사·구분별 · 품목별(월마다 상위 N) 세 덩어리를 위에서 아래로 */
-  function aoa(sum) {
+  function aoa(sum, multi) {
     var out = [];
-    out.push(['월별 수주 vs 매입 — 기준: ' + sum.byLabel]);
-    out.push([NOTE]);
+    out.push(['월별 수주 vs 매입 — 기준: ' + sum.byLabel + (sum.by === BY_FIXED ? '(확정)' : '(참고)')]);
     out.push([]);
+    out.push(['월별 총금액 비교 — 단가가 없는 줄이 있어도 합계끼리 비교']);
+    out.push([SHARE_NOTE]);
+    out.push([sum.byLabel].concat(TOTAL_HEAD));
+    sum.months.forEach(function (m) { out.push([m.label].concat(totalCells(m))); });
+    out.push(['합계'].concat(totalCells(sum.total)));
+    out.push([]);
+    out.push(['월별 상세 — 차액·차익률(둘 다 있는 줄)은 보조 정보']);
+    out.push([NOTE]);
     out.push([sum.byLabel].concat(HEAD));
     sum.months.forEach(function (m) { out.push([m.label].concat(cells(m))); });
     out.push(['합계'].concat(cells(sum.total)));
@@ -128,8 +155,14 @@
     sum.months.concat([Object.assign({ label: '전체' }, sum.total)]).forEach(function (m) {
       m.items.forEach(function (it) { out.push([m.label, it.item, it.customerItem !== it.item ? it.customerItem : '', it.name, it.customers.join(', ')].concat(cells(it))); });
     });
+    if (multi && multi.length) {
+      out.push([]);
+      out.push(['매입단가표에 단가가 둘 이상인 품목 — 가장 위쪽 행 단가를 씀(2026-09-30 확정: 품번별 생산처는 1곳으로 정리 예정)']);
+      out.push(['품목코드(천일품번)', '쓴 단가', '쓴 생산처', '쓴 행', '다른 값(단가 · 생산처 · 행)', '이번 수주 행 수']);
+      multi.forEach(function (x) { out.push([x.key, x.price, x.maker, x.row, x.others, x.rows]); });
+    }
     return out;
   }
 
-  return { BY: BY, NO_DATE: NO_DATE, DEFAULT_TOP: DEFAULT_TOP, NOTE: NOTE, SHEET: '월별 수주 vs 매입', options: options, monthOf: monthOf, summarize: summarize, aoa: aoa };
+  return { BY: BY, BY_FIXED: BY_FIXED, NO_DATE: NO_DATE, DEFAULT_TOP: DEFAULT_TOP, NOTE: NOTE, SHARE_NOTE: SHARE_NOTE, sentence: sentence, SHEET: '월별 수주 vs 매입', options: options, monthOf: monthOf, summarize: summarize, aoa: aoa };
 });

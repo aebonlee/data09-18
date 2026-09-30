@@ -320,6 +320,8 @@ begin
     array[2000, 980, 300, 30.0]::numeric[], '10월: 수주 2,000 · 매입 980 · 차액 300(둘 다 있는 줄만) · 차익률 30%');
   perform public._assert_eq((select array[diff, rate] from public.intake_monthly_summary where batch_id = v_m and month_basis = 'due' and month = '2026-11'),
     array[-20, -20.0]::numeric[], '11월: 매입이 비싸면 차액·차익률 음수');
+  perform public._assert_eq((select array_agg(share order by month) from public.intake_monthly_summary where batch_id = v_m and month_basis = 'due'),
+    array[49.0, 120.0]::numeric[], '비중(11.14): 10월 980 ÷ 2,000 = 49.0% · 11월 120 ÷ 100 = 120.0% — 한쪽 단가만 있는 줄도 합계에');
   perform public._assert_eq((select string_agg(month || ':' || row_count, ',' order by month) from public.intake_monthly_summary where batch_id = v_m and month_basis = 'order'),
     ':1,2026-09:2,2026-10:1', '발주월: 발주일 없는 줄은 빈 달 한 칸');
   delete from public.intake_batch where id = v_m;

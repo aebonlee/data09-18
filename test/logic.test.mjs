@@ -736,14 +736,53 @@ test('Excel 시트 「월별 수주 vs 매입」: 월별 표 + 합계 + 고객�
   const A = MO.aoa(MO.summarize(MR));
   assert.equal(MO.SHEET, '월별 수주 vs 매입');
   const hi = A.findIndex((r) => r[0] === '납기월' && r[1] === '행 수');
-  assert.deepEqual(A[hi + 1].slice(0, 10), ['2026-10', 3, 19, 2000, 1, 980, 1, 1, 300, 30]);
-  assert.deepEqual(A.find((r) => r[0] === '합계').slice(3, 6), [2200, 1, 1170]);
+  assert.deepEqual(A[hi + 1].slice(0, 11), ['2026-10', 3, 19, 2000, 1, 980, 1, 49, 1, 300, 30]);
+  assert.deepEqual(A.slice(hi).find((r) => r[0] === '합계').slice(3, 6), [2200, 1, 1170]);
   assert.ok(A.some((r) => r[0] === '고객사 · 구분별') && A.some((r) => /^품목별/.test(r[0])));
   const R = P.apply(MI.rows, PT, {}), S = MO.summarize(R.rows);
   assert.equal(S.total.buy, R.stats.buyAmount); assert.equal(S.total.sale, R.stats.saleAmount);
   assert.deepEqual([S.total.buyNone, S.total.saleNone], [R.stats.buyNone, R.stats.saleNone]);
   assert.equal(S.total.diff, R.stats.marginAmount);                                             // 차액 = 판매 − 매입 합계(둘 다 있는 줄)
   assert.equal(S.total.rows, MI.rows.length);
+});
+
+
+console.log('네 번째 답변(2026-09-30) — 가장 위쪽 매입단가 · 총금액 비교(비중) · 납기월 확정 — 기획서 11.14');
+// 손으로 만든 매입단가표: X 는 세 생산처(100·90·80) → 가장 위쪽 100, Y 는 하나
+const PT4 = P.parseBook({ names: ['s'], sheets: { s: [['품목코드', '생산처', '매입단가'], ['X', '가', 100], ['X', '나', 90], ['Y', '가', 50], ['X', '다', 80]] } });
+test('단가가 여럿인 품번은 가장 위쪽 행 단가 · 행에 buyMulti 표시 · 목록(쓴 값·다른 값·이번 수주 행 수)', () => {
+  assert.deepEqual(PT4.map.X, { price: 100, maker: '가', row: 2, sheet: 's' });
+  const R = P.apply([{ item: 'X', company: 'X', qty: 3, price: 120 }, { item: 'Y', company: 'Y', qty: 2, price: null }, { item: 'X', company: 'X', qty: 1, price: 120 }], PT4, {});
+  assert.deepEqual(R.rows.map((r) => [r.buyPrice, r.maker, r.buyMulti, r.buyAmount]), [[100, '가', true, 300], [50, '가', false, 100], [100, '가', true, 100]]);
+  assert.deepEqual([R.stats.buyMultiRows, R.stats.buyMultiItems], [2, 1]);
+  assert.deepEqual(P.multiList(PT4, R.rows), [{ key: 'X', price: 100, maker: '가', row: 2, rows: 2, others: '90 · 나 · 3행 / 80 · 다 · 5행' }]);
+  assert.deepEqual(P.multiList(PT4, [{ item: 'Y', company: 'Y', buyMulti: false }]), []);            // 이번 수주에 없으면 목록에서 뺌
+  const S = P.apply(MI.rows, PT, {}), c105 = S.rows.filter((r) => r.company === 'SMP-C105');     // 예시: C105 500(생산처A) / 520(생산처B)
+  assert.ok(c105.length === 1 && c105[0].buyPrice === 500 && c105[0].buyMulti && c105[0].maker === '생산처A(가상)');
+  assert.deepEqual(P.multiList(PT, S.rows).map((x) => [x.key, x.price, x.others, x.rows]), [['SMP-C105', 500, '520 · 생산처B(가상) · 17행', 1]]);
+});
+test('총금액 비교: 비중 = 발주(매입)금액 합계 ÷ 수주금액 합계 × 100, 단가가 한쪽만 있는 줄도 그쪽 합계에 넣음', () => {
+  const S = MO.summarize(MR);
+  // 10월: 수주 10×100 + 5×200 = 2,000 · 발주 10×70 + 4×70 = 980 → 49.0% / 11월: 100 · 120 → 120.0% / 납기 없음: 100 · 70 → 70.0%
+  assert.deepEqual(S.months.map((m) => [m.label, m.sale, m.buy, m.share]), [['2026-10', 2000, 980, 49], ['2026-11', 100, 120, 120], ['(납기일 없음)', 100, 70, 70]]);
+  assert.equal(S.total.share, 53.2);                                                          // 1,170 ÷ 2,200 = 53.18…%
+  assert.equal(MO.sentence(S.months[0]), '2026-10 수주금액 2,000원 · 발주금액 980원 · 수주금액 대비 발주금액 49.0% (수주단가 없음 1행 · 매입단가 없음 1행)');
+  assert.equal(MO.sentence(S.months[1]), '2026-11 수주금액 100원 · 발주금액 120원 · 수주금액 대비 발주금액 120.0%');
+  assert.equal(MO.summarize([{ qty: 3, price: null, buyPrice: 10, due: '2026-10-01' }]).total.share, null); // 수주금액 0 이면 비중 비움
+  assert.equal(S.total.rate, 25.8);                                                           // 차액·차익률(둘 다 있는 줄)은 그대로 보조 정보
+});
+test('납기월 확정: 기본·확정 기준은 납기월 · Excel 첫 덩어리 = 월별 총금액 비교(비중) · 단가 여럿 품목 목록', () => {
+  assert.equal(MO.options({}).by, 'due'); assert.equal(MO.BY_FIXED, 'due');
+  const A = MO.aoa(MO.summarize(MR), P.multiList(PT4, P.apply([{ item: 'X', company: 'X', qty: 1 }], PT4, {}).rows));
+  assert.match(A[0][0], /납기월\(확정\)/);
+  assert.match(MO.aoa(MO.summarize(MR, { by: 'order' }))[0][0], /발주월\(참고\)/);
+  const hi = A.findIndex((r) => r[0] === '납기월' && r[1] === '수주금액');
+  assert.ok(hi > 0 && hi < A.findIndex((r) => r[0] === '납기월' && r[1] === '행 수'));        // 총금액 비교가 상세보다 위
+  assert.deepEqual(A[hi].slice(1, 4), ['수주금액', '발주금액(매입)', '비중(발주÷수주, %)']);
+  assert.deepEqual(A.slice(hi + 1, hi + 5), [['2026-10', 2000, 980, 49, 1, 1, 3], ['2026-11', 100, 120, 120, 0, 0, 1], ['(납기일 없음)', 100, 70, 70, 0, 0, 1], ['합계', 2200, 1170, 53.2, 1, 1, 5]]);
+  const mi = A.findIndex((r) => /단가가 둘 이상/.test(r[0] || ''));
+  assert.deepEqual(A[mi + 2], ['X', 100, '가', 2, '90 · 나 · 3행 / 80 · 다 · 5행', 1]);
+  assert.equal(MO.aoa(MO.summarize(MR)).findIndex((r) => /단가가 둘 이상/.test(r[0] || '')), -1);   // 없으면 덩어리도 없음
 });
 
 console.log(`\n${passed}개 통과`);
